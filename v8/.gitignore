@@ -43,7 +43,6 @@ shell_g
 /base
 /build
 /gypfiles/win_toolchain.json
-/buildtools
 /hydrogen.cfg
 /obj
 /out
