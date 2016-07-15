@@ -13,6 +13,7 @@
 #include <string.h>
 #include <cstring>
 #include <stddef.h>
+#include <errno.h>
 #define ENABLE_PROFILER 0
 #if ENABLE_PROFILER
 #include <v8-profiler.h>
@@ -110,13 +111,13 @@ jobject jthis;
 JavaVM* sVm = NULL;
 
 static void ReportException(v8::Isolate* isolate,
-                     v8::TryCatch* try_catch,
-                     jstring jinstanceid,
-                     const char* func);
+                            v8::TryCatch* try_catch,
+                            jstring jinstanceid,
+                            const char* func);
 static bool ExecuteString(v8::Isolate* isolate,
-                   v8::Local<v8::String> source,
-                   bool print_result,
-                   bool report_exceptions);
+                          v8::Local<v8::String> source,
+                          bool print_result,
+                          bool report_exceptions);
 static v8::Local<v8::Context> CreateShellContext();
 static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args);
 static void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -202,8 +203,8 @@ static const char* ToCString(const v8::String::Utf8Value& value) {
 }
 
 static v8::Local<v8::String> jstring2V8String(JNIEnv* env,
-                                       jstring str,
-                                       v8::Isolate* isolate) {
+                                              jstring str,
+                                              v8::Isolate* isolate) {
   if (str != NULL) {
     const char* c_str = env->GetStringUTFChars(str, NULL);
     if (c_str) {
@@ -213,6 +214,50 @@ static v8::Local<v8::String> jstring2V8String(JNIEnv* env,
     }
   }
   return v8::String::Empty(isolate);
+}
+
+static bool RunFromCache(v8::Isolate* isolate, const char* scriptStr) {
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::Context::Scope ctx_scope(v8::Local<v8::Context>::New(isolate, V8context));
+  v8::HandleScope handleScope(isolate);
+  FILE* f;
+  f = fopen("/sdcard/cache.data", "rb");
+  if (!f) {
+    LOGE("unable to open cache file: %s", strerror(errno));
+    return false;
+  }
+
+  fseek(f, 0, SEEK_END);
+  size_t size = ftell(f);
+  rewind(f);
+  uint8_t* buffer = new uint8_t[size];
+  if (size != fread(buffer, 1, size, f)) {
+    delete[] buffer;
+    fclose(f);
+    LOGE("unable to read enough data");
+    return false;
+  }
+  fclose(f);
+  v8::ScriptCompiler::CachedData* cacheData =
+      new v8::ScriptCompiler::CachedData(
+          buffer, size, v8::ScriptCompiler::CachedData::BufferOwned);
+  v8::ScriptCompiler::Source source(v8::String::NewFromUtf8(isolate, scriptStr),
+                                    cacheData);
+  v8::Local<v8::UnboundScript> unboundScript =
+      v8::ScriptCompiler::CompileUnbound(isolate, &source,
+                                         v8::ScriptCompiler::kConsumeCodeCache);
+  v8::TryCatch tryCatch(isolate);
+  v8::MaybeLocal<v8::Value> result =
+      unboundScript->BindToCurrentContext()->Run(isolate->GetCurrentContext());
+  if (result.IsEmpty()) {
+    assert(tryCatch.HasCaught());
+    // Print errors that happened during execution.
+    ReportException(isolate, &tryCatch, NULL, "");
+  } else {
+    assert(!tryCatch.HasCaught());
+  }
+  LOGE("run with cache!");
+  return true;
 }
 
 extern "C" {
@@ -299,8 +344,12 @@ jint Java_com_taobao_weex_bridge_WXBridge_initFramework(JNIEnv* env,
       jstring2V8String(env, (jstring)deviceHeight, globalIsolate));
 
   V8context.Reset(globalIsolate, CreateShellContext());
-  ExecuteString(globalIsolate,
-                v8::String::NewFromUtf8(globalIsolate, scriptStr), true, true);
+  if (!RunFromCache(globalIsolate, scriptStr)) {
+    LOGE("failed run with cache!");
+    ExecuteString(globalIsolate,
+                  v8::String::NewFromUtf8(globalIsolate, scriptStr), true,
+                  true);
+  }
   return true;
 }
 
@@ -403,7 +452,7 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
       jdouble jdoubleobj = (env)->CallDoubleMethod(jdataobj, jdoublevalueid);
       obj[i] = v8::Number::New(globalIsolate, (double)jdoubleobj);
       //			LOGA("jsLog>>> instance
-      //jdoubleobj:%d",jdoubleobj);
+      // jdoubleobj:%d",jdoubleobj);
     } else if (jtypeint == 2) {
       jstring jdatastr = (jstring)jdataobj;
       obj[i] = jstring2V8String(env, jdatastr, globalIsolate);
@@ -412,7 +461,7 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
       jstring jdatastr = (jstring)jdataobj;
       obj[i] = jstring2V8String(env, jdatastr, globalIsolate);
       //		    obj[i]=
-      //v8::String::NewFromUtf8((env)->GetStringUTFChars(jdatastr,NULL));
+      // v8::String::NewFromUtf8((env)->GetStringUTFChars(jdatastr,NULL));
     } else if (jtypeint == 3) {
       v8::Local<v8::Value> jsonobj[1];
       v8::Local<v8::Object> global =
@@ -637,8 +686,7 @@ void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& args) {
 // functions.
 v8::Local<v8::Context> CreateShellContext() {
   // Create a template for the global object.
-  v8::Local<v8::ObjectTemplate> global =
-      v8::ObjectTemplate::New(globalIsolate);
+  v8::Local<v8::ObjectTemplate> global = v8::ObjectTemplate::New(globalIsolate);
   // Bind the global 'callNative' function to the C++ Print callback.
   global->Set(v8::String::NewFromUtf8(globalIsolate, "callNative"),
               v8::FunctionTemplate::New(globalIsolate, callNative));

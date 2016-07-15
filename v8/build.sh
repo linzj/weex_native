@@ -1,4 +1,5 @@
-if [ -n $TARGET_ARCH ]; then TARGET_ARCH=armeabi-v7a; fi
+if [ -z $TARGET_ARCH ]; then TARGET_ARCH=armeabi-v7a; fi
+if [ -z $BUILD_TYPE ]; then BUILD_TYPE=release; fi
 
 V8PATH=${0%/*}
 cd $V8PATH
@@ -39,4 +40,4 @@ if [ "$USE_CCACHE" = "1" ] || [ "$NDK_CCACHE" = "ccache" ]; then
   export CC_host='ccache gcc'
 fi
 
-make android_"$ARCH".release -j9 backtrace=off ${EXTRA_OPTION} snapshot=off android_ndk_root=${ANDROID_NDK_ROOT}
+make android_"$ARCH".$BUILD_TYPE -j9 backtrace=off ${EXTRA_OPTION} snapshot=off android_ndk_root=${ANDROID_NDK_ROOT}
