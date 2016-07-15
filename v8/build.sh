@@ -1,6 +1,5 @@
-if [ $TARGET_ARCH -n ]; then
-    TARGET_ARCH=armeabi-v7a
-fi
+if [ -n $TARGET_ARCH ]; then TARGET_ARCH=armeabi-v7a; fi
+
 V8PATH=${0%/*}
 cd $V8PATH
 

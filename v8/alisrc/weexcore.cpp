@@ -109,24 +109,24 @@ jclass jBridgeClazz;
 jobject jthis;
 JavaVM* sVm = NULL;
 
-void ReportException(v8::Isolate* isolate,
+static void ReportException(v8::Isolate* isolate,
                      v8::TryCatch* try_catch,
                      jstring jinstanceid,
                      const char* func);
-bool ExecuteString(v8::Isolate* isolate,
-                   v8::Handle<v8::String> source,
+static bool ExecuteString(v8::Isolate* isolate,
+                   v8::Local<v8::String> source,
                    bool print_result,
                    bool report_exceptions);
-v8::Local<v8::Context> CreateShellContext();
-void callNative(const v8::FunctionCallbackInfo<v8::Value>& args);
-void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args);
-void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& args);
+static v8::Local<v8::Context> CreateShellContext();
+static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args);
+static void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args);
+static void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& args);
 
-v8::Persistent<v8::Context> V8context;
-v8::Isolate* globalIsolate;
-v8::Handle<v8::Object> json;
-v8::Handle<v8::Function> json_parse;
-v8::Handle<v8::Function> json_stringify;
+static v8::Persistent<v8::Context> V8context;
+static v8::Isolate* globalIsolate;
+static v8::Local<v8::Object> json;
+static v8::Local<v8::Function> json_parse;
+static v8::Local<v8::Function> json_stringify;
 
 #if ENABLE_HEAP_SNAPSHOT
 static int mysignal;
@@ -187,20 +187,21 @@ void init(void) {
       SIGRTMAX, mysignal, strerror(errno));
 }
 #endif  // ENABLE_HEAP_SNAPSHOT
-v8::Handle<v8::ObjectTemplate> WXEnvironment;
+v8::Local<v8::ObjectTemplate> WXEnvironment;
 
-JNIEnv* getJNIEnv() {
+static JNIEnv* getJNIEnv() {
   JNIEnv* env = NULL;
   if ((sVm)->GetEnv((void**)&env, JNI_VERSION_1_4) != JNI_OK) {
     return JNI_FALSE;
   }
   return env;
 }
-const char* ToCString(const v8::String::Utf8Value& value) {
+
+static const char* ToCString(const v8::String::Utf8Value& value) {
   return *value ? *value : "<string conversion failed>";
 }
 
-v8::Local<v8::String> jstring2V8String(JNIEnv* env,
+static v8::Local<v8::String> jstring2V8String(JNIEnv* env,
                                        jstring str,
                                        v8::Isolate* isolate) {
   if (str != NULL) {
@@ -382,7 +383,7 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
       v8::Local<v8::Context>::New(globalIsolate, V8context));
   v8::TryCatch try_catch;
   int length = env->GetArrayLength(jargs);
-  v8::Handle<v8::Value> obj[length];
+  v8::Local<v8::Value> obj[length];
   //	LOGA("jsLog>>> execJSbegin++++++++++++++++++++++++");
   //	jstring2Log(env,jinstanceid,jfunction);
   jclass jsobjectclazz = (env)->FindClass("com/taobao/weex/bridge/WXJSObject");
@@ -413,26 +414,26 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
       //		    obj[i]=
       //v8::String::NewFromUtf8((env)->GetStringUTFChars(jdatastr,NULL));
     } else if (jtypeint == 3) {
-      v8::Handle<v8::Value> jsonobj[1];
-      v8::Handle<v8::Object> global =
+      v8::Local<v8::Value> jsonobj[1];
+      v8::Local<v8::Object> global =
           v8::Local<v8::Context>::New(globalIsolate, V8context)->Global();
-      json = v8::Handle<v8::Object>::Cast(
+      json = v8::Local<v8::Object>::Cast(
           global->Get(v8::String::NewFromUtf8(globalIsolate, "JSON")));
-      json_parse = v8::Handle<v8::Function>::Cast(
+      json_parse = v8::Local<v8::Function>::Cast(
           json->Get(v8::String::NewFromUtf8(globalIsolate, "parse")));
       jsonobj[0] = v8::String::NewFromUtf8(
           globalIsolate, (env)->GetStringUTFChars((jstring)jdataobj, 0));
-      v8::Handle<v8::Value> ret = json_parse->Call(json, 1, jsonobj);
+      v8::Local<v8::Value> ret = json_parse->Call(json, 1, jsonobj);
       obj[i] = ret;
       //			jstring2Log(env, jinstanceid,(jstring)jdataobj);
     }
   }
 
   const char* func = (env)->GetStringUTFChars(jfunction, 0);
-  v8::Handle<v8::Object> global =
+  v8::Local<v8::Object> global =
       v8::Local<v8::Context>::New(globalIsolate, V8context)->Global();
-  v8::Handle<v8::Function> function;
-  v8::Handle<v8::Value> result;
+  v8::Local<v8::Function> function;
+  v8::Local<v8::Value> result;
   if (jnamespace == NULL) {
 #if ENABLE_PROFILER
     v8::CpuProfiler& profiler = *globalIsolate->GetCpuProfiler();
@@ -444,7 +445,7 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
     struct timespec t1, t2;
     clock_gettime(CLOCK_MONOTONIC, &t1);
 #endif
-    function = v8::Handle<v8::Function>::Cast(
+    function = v8::Local<v8::Function>::Cast(
         global->Get(v8::String::NewFromUtf8(globalIsolate, func)));
     result = function->Call(global, length, obj);
 #if ENABLE_PROFILER
@@ -457,11 +458,11 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
     const_cast<v8::CpuProfile*>(profile)->Delete();
 #endif
   } else {
-    v8::Handle<v8::Object> master =
-        v8::Handle<v8::Object>::Cast(global->Get(v8::String::NewFromUtf8(
+    v8::Local<v8::Object> master =
+        v8::Local<v8::Object>::Cast(global->Get(v8::String::NewFromUtf8(
             globalIsolate, ((env)->GetStringUTFChars(jnamespace, 0)))));
     function =
-        v8::Handle<v8::Function>::Cast(master->Get(v8::String::NewFromUtf8(
+        v8::Local<v8::Function>::Cast(master->Get(v8::String::NewFromUtf8(
             globalIsolate, ((env)->GetStringUTFChars(jfunction, 0)))));
     result = function->Call(master, length, obj);
   }
@@ -475,20 +476,20 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
 }
 
 bool ExecuteString(v8::Isolate* isolate,
-                   v8::Handle<v8::String> source,
+                   v8::Local<v8::String> source,
                    bool print_result,
                    bool report_exceptions) {
   v8::Isolate::Scope isolate_scope(isolate);
   v8::Context::Scope ctx_scope(v8::Local<v8::Context>::New(isolate, V8context));
   v8::TryCatch try_catch;
-  v8::Handle<v8::Script> script = v8::Script::Compile(source);
+  v8::Local<v8::Script> script = v8::Script::Compile(source);
   if (script.IsEmpty()) {
     // Print errors that happened during compilation.
     if (report_exceptions)
       ReportException(isolate, &try_catch, NULL, "");
     return false;
   } else {
-    v8::Handle<v8::Value> result = script->Run();
+    v8::Local<v8::Value> result = script->Run();
     if (result.IsEmpty()) {
       assert(try_catch.HasCaught());
       // Print errors that happened during execution.
@@ -525,7 +526,7 @@ void ReportException(v8::Isolate* isolate,
                      const char* func) {
   v8::HandleScope handle_scope(isolate);
   v8::String::Utf8Value exception(try_catch->Exception());
-  v8::Handle<v8::Message> message = try_catch->Message();
+  v8::Local<v8::Message> message = try_catch->Message();
   if (message.IsEmpty()) {
     // V8 didn't provide any extra information about this error; just
     // print the exception.
@@ -553,15 +554,15 @@ void callNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
   jstring jtaskString = NULL;
   if (args[1]->IsObject()) {
     LOGD("args[1] is object");
-    v8::Handle<v8::Value> obj[1];
-    v8::Handle<v8::Object> global =
+    v8::Local<v8::Value> obj[1];
+    v8::Local<v8::Object> global =
         v8::Local<v8::Context>::New(globalIsolate, V8context)->Global();
-    json = v8::Handle<v8::Object>::Cast(
+    json = v8::Local<v8::Object>::Cast(
         global->Get(v8::String::NewFromUtf8(globalIsolate, "JSON")));
-    json_stringify = v8::Handle<v8::Function>::Cast(
+    json_stringify = v8::Local<v8::Function>::Cast(
         json->Get(v8::String::NewFromUtf8(globalIsolate, "stringify")));
     obj[0] = args[1];
-    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::Local<v8::Value> ret = json_stringify->Call(json, 1, obj);
     v8::String::Utf8Value str(ret);
     jtaskString = (env)->NewStringUTF(ToCString(str));
     LOGD(" callNative is object");
@@ -636,7 +637,7 @@ void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& args) {
 // functions.
 v8::Local<v8::Context> CreateShellContext() {
   // Create a template for the global object.
-  v8::Handle<v8::ObjectTemplate> global =
+  v8::Local<v8::ObjectTemplate> global =
       v8::ObjectTemplate::New(globalIsolate);
   // Bind the global 'callNative' function to the C++ Print callback.
   global->Set(v8::String::NewFromUtf8(globalIsolate, "callNative"),
