@@ -9,7 +9,7 @@
       'type': 'none',
       'dependencies': [
         '../src/d8.gyp:d8',
-        '../src/buildcache.gyp:buildcache',
+        '../alisrc/alisrc.gyp:*',
       ],
       'conditions': [
         ['component!="shared_library"', {

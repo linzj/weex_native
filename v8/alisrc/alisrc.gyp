@@ -15,16 +15,6 @@
       'sources': [
         'buildcache.cc',
       ],
-      'conditions': [
-        [ 'want_separate_host_toolset==1', {
-          'toolsets': [ 'target', ],
-        }],
-        ['OS=="win" and v8_enable_i18n_support==1', {
-          'dependencies': [
-            '<(icu_gyp_path):icudata',
-          ],
-        }],
-      ],
     },
   ],
 }
