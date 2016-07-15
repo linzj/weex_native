@@ -59,8 +59,6 @@ shell_g
 /test/test262/data.tar
 /testing/gmock
 /testing/gtest
-/third_party
-/third_party/icu
 /third_party/llvm
 /third_party/llvm-build
 /tools/clang
