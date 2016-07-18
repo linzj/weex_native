@@ -300,7 +300,6 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
     return false;
   }
   env->ReleaseStringUTFChars(jfunction, func);
-  env->DeleteLocalRef(jfunction);
   return true;
 }
 }
