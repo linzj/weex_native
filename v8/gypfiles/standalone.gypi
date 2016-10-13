@@ -416,7 +416,7 @@
     'arm_version%': 'default',
     'arm_fpu%': 'vfpv3',
     'arm_float_abi%': 'default',
-    'arm_thumb': 'default',
+    'arm_thumb': '1',
 
     # Default MIPS variable settings.
     'mips_arch_variant%': 'r2',

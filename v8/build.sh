@@ -40,4 +40,4 @@ if [ "$USE_CCACHE" = "1" ] || [ "$NDK_CCACHE" = "ccache" ]; then
   export CC_host='ccache gcc'
 fi
 
-make android_"$ARCH".$BUILD_TYPE -j9 backtrace=off ${EXTRA_OPTION} snapshot=off android_ndk_root=${ANDROID_NDK_ROOT}
+make android_"$ARCH".$BUILD_TYPE -j9 backtrace=off ${EXTRA_OPTION} snapshot=off i18nsupport=off armthumb=on android_ndk_root=${ANDROID_NDK_ROOT}
