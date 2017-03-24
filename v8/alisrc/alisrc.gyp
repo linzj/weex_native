@@ -30,6 +30,14 @@
         'sources': [
           'weexcore.cpp',
           'LogUtils.h',
+          'CachedMetaData.cpp',
+          'Semaphore.cpp',
+          'StringHashMap.cpp',
+          'Trace.cpp',
+          'V8DefaultPlatform.cpp',
+          'V8ScriptRunner.cpp',
+          'V8TaskQueue.cpp',
+          'V8WorkerThread.cpp',
         ],
         'ldflags':[
             '-Wl,--version-script=<(DEPTH)/alisrc/weexcore_version_script.txt',
