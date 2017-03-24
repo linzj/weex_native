@@ -1,49 +1,122 @@
-#include "jni.h"
-#include "android/log.h"
 #include "LogUtils.h"
+#include "android/log.h"
+#include "jni.h"
 
-#include <libplatform/libplatform.h>
-#include <v8.h>
+#ifdef V8CORE_U4
+#include "V8DefaultPlatform.h"
+#include "V8ScriptRunner.h"
+#endif
+
 #include <assert.h>
-#include <errno.h>
 #include <fcntl.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
+#include <limits.h>
+#include <time.h>
+#include <v8-profiler.h>
+#include <v8.h>
+#include "Trace.h"
 
-static jclass jBridgeClazz;
-static jobject jThis;
-static JavaVM* sVm = NULL;
+jclass jBridgeClazz;
+jmethodID jCallAddElementMethodId;
+jmethodID jDoubleValueMethodId;
+jmethodID jSetTimeoutNativeMethodId;
+jmethodID jCallNativeMethodId;
+jmethodID jCallNativeModuleMethodId;
+jmethodID jCallNativeComponentMethodId;
+jmethodID jLogMethodId;
+jobject jThis;
+JavaVM* sVm = NULL;
 
-static void ReportException(v8::Isolate* isolate,
-                            v8::TryCatch* try_catch,
-                            jstring jinstanceid,
-                            const char* func);
+// for makeIdleNotification
+static const size_t SHORT_TERM_IDLE_TIME_IN_MS = 10;
+static const size_t LONG_TERM_IDLE_TIME_IN_MS = 1000;
+static const unsigned long MIN_EXECJS_COUNT = 100;
+static const unsigned long MAX_EXECJS_COUNT = LONG_MAX;
+static unsigned long execJSCount = 0;
+static unsigned long lastExecJSCount = 0;
+static const int samplingBegin = 5;
+static const int denomValue = 3;
+static unsigned long samplingExecJSCount = 0;
+static const int samplingExecJSCountMax = 10;
+static bool idle_notification_FLAG = true;
 
+long getCPUTime() {
+  struct timespec ts;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static void ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch,
+                            jstring jinstanceid, const char* func);
 static bool ExecuteJavaScript(v8::Isolate* isolate,
-                              v8::Local<v8::String> source,
+                              v8::Handle<v8::String> source,
                               bool report_exceptions);
+static void makeIdleNotification(v8::Isolate* isolate);
+static void resetIdleNotificationCount();
+static void takeHeapSnapshot(const char* filename);
+static void timerTraceProfilerInMainThread(const char* name, int status);
 
+#ifdef V8CORE_U3
+static v8::Persistent<v8::Context> CreateShellContext();
+static v8::Handle<v8::Value> callNative(const v8::Arguments& args);
+static v8::Handle<v8::Value> setTimeoutNative(const v8::Arguments& args);
+static v8::Handle<v8::String> nativeLog(const char* name);
+static v8::Handle<v8::Value> markupState(const v8::Arguments& args);
+#elif defined(V8CORE_U4)
 static v8::Local<v8::Context> CreateShellContext();
-
 static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args);
-
 static void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args);
-
 static void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& name);
+static void notifyTrimMemory(const v8::FunctionCallbackInfo<v8::Value>& args);
+static void notifySerializeCodeCache(
+    const v8::FunctionCallbackInfo<v8::Value>& args);
+static void compileAndRunBundle(
+    const v8::FunctionCallbackInfo<v8::Value>& args);
+static void markupState(const v8::FunctionCallbackInfo<v8::Value>& args);
+#endif
 
-static v8::Platform* g_platform;
 static v8::Persistent<v8::Context> V8context;
 static v8::Isolate* globalIsolate;
-static v8::ArrayBuffer::Allocator* g_array_buffer_allocator;
-static v8::Local<v8::Object> json;
-static v8::Local<v8::Function> json_parse;
-static v8::Local<v8::Function> json_stringify;
+static v8::Handle<v8::Object> json;
+static v8::Handle<v8::Function> json_parse;
+static v8::Handle<v8::Function> json_stringify;
+static v8::Handle<v8::ObjectTemplate> WXEnvironment;
+#ifdef V8CORE_U4
+static bool v8_platform_inited = false;
+#endif
 
-static v8::Local<v8::ObjectTemplate> WXEnvironment;
+class AsciiOutputStream : public v8::OutputStream {
+ public:
+  AsciiOutputStream(FILE* stream) : m_stream(stream) {}
 
-static JNIEnv* getJNIEnv() {
+  virtual int GetChunkSize() { return 51200; }
+
+  virtual void EndOfStream() {}
+
+  virtual WriteResult WriteAsciiChunk(char* data, int size) {
+    if (NULL == m_stream) return kAbort;
+
+    const size_t len = static_cast<size_t>(size);
+    size_t offset = 0;
+    while (offset < len && !feof(m_stream) && !ferror(m_stream)) {
+      offset += fwrite(data + offset, 1, len - offset, m_stream);
+    }
+
+    return offset == len ? kContinue : kAbort;
+  }
+
+ private:
+  FILE* m_stream;
+};
+
+static void timerTraceProfilerInMainThread(const char* name, int status) {
+  if (!status) {
+    TRACE_EVENT_BEGIN0("v8", name);
+  } else {
+    TRACE_EVENT_END0("v8", name);
+  }
+}
+
+JNIEnv* getJNIEnv() {
   JNIEnv* env = NULL;
   if ((sVm)->GetEnv((void**)&env, JNI_VERSION_1_4) != JNI_OK) {
     return JNI_FALSE;
@@ -51,100 +124,345 @@ static JNIEnv* getJNIEnv() {
   return env;
 }
 
-static const char* ToCString(const v8::String::Utf8Value& value) {
+const char* ToCString(const v8::String::Utf8Value& value) {
   return *value ? *value : "<string conversion failed>";
 }
 
-static v8::Local<v8::Value> jString2V8String(JNIEnv* env, jstring str) {
-  v8::Isolate* isolate = globalIsolate;
+const char* jstringToCString(JNIEnv* env, jstring str) {
+  if (str != NULL) {
+    const char* c_str = env->GetStringUTFChars(str, NULL);
+    return c_str;
+  }
+  return "";
+}
+
+#ifdef V8CORE_U3
+v8::Handle<v8::Value> jString2V8String(JNIEnv* env, jstring str) {
   if (str != NULL) {
     const char* c_str = env->GetStringUTFChars(str, NULL);
     if (c_str) {
-      v8::Local<v8::Value> ret = v8::String::NewFromUtf8(isolate, c_str);
+      v8::Handle<v8::Value> ret = v8::String::New(c_str);
       env->ReleaseStringUTFChars(str, c_str);
       return ret;
     }
   }
-  return v8::String::NewFromUtf8(isolate, "");
+  return v8::String::New("");
 }
+#elif defined(V8CORE_U4)
+v8::Local<v8::Value> jString2V8String(JNIEnv* env, jstring str) {
+  if (str != NULL) {
+    const char* c_str = env->GetStringUTFChars(str, NULL);
+    if (c_str) {
+      v8::Local<v8::Value> ret = v8::String::NewFromUtf8(globalIsolate, c_str);
+      env->ReleaseStringUTFChars(str, c_str);
+      return ret;
+    }
+  }
+  return v8::String::NewFromUtf8(globalIsolate, "");
+}
+#endif
 
-static void jString2Log(JNIEnv* env, jstring instance, jstring str) {
+extern "C" {
+void jString2Log(JNIEnv* env, jstring instance, jstring str) {
   if (str != NULL) {
     const char* c_instance = env->GetStringUTFChars(instance, NULL);
     const char* c_str = env->GetStringUTFChars(str, NULL);
     if (c_str) {
       LOGA("jsLog>>> instance :%s,c_str:%s", c_instance, c_str);
     }
+    env->ReleaseStringUTFChars(instance, c_instance);
+    env->ReleaseStringUTFChars(str, c_str);
   }
 }
 
-static bool RunFromCache(v8::Isolate* isolate, const char* scriptStr) {
-  v8::Isolate::Scope isolate_scope(isolate);
-  v8::Context::Scope ctx_scope(v8::Local<v8::Context>::New(isolate, V8context));
-  v8::HandleScope handleScope(isolate);
-  FILE* f;
-  f = fopen("/sdcard/cache.data", "rb");
-  if (!f) {
-    LOGE("unable to open cache file: %s", strerror(errno));
-    return false;
-  }
-
-  fseek(f, 0, SEEK_END);
-  size_t size = ftell(f);
-  rewind(f);
-  uint8_t* buffer = new uint8_t[size];
-  if (size != fread(buffer, 1, size, f)) {
-    delete[] buffer;
-    fclose(f);
-    LOGE("unable to read enough data");
-    return false;
-  }
-  fclose(f);
-  v8::ScriptCompiler::CachedData* cacheData =
-      new v8::ScriptCompiler::CachedData(
-          buffer, size, v8::ScriptCompiler::CachedData::BufferOwned);
-  v8::ScriptCompiler::Source source(v8::String::NewFromUtf8(isolate, scriptStr),
-                                    cacheData);
-  v8::Local<v8::UnboundScript> unboundScript =
-      v8::ScriptCompiler::CompileUnbound(isolate, &source,
-                                         v8::ScriptCompiler::kConsumeCodeCache);
-  v8::TryCatch tryCatch(isolate);
-  v8::MaybeLocal<v8::Value> result =
-      unboundScript->BindToCurrentContext()->Run(isolate->GetCurrentContext());
-  if (result.IsEmpty()) {
-    assert(tryCatch.HasCaught());
-    // Print errors that happened during execution.
-    ReportException(isolate, &tryCatch, NULL, "");
+jstring v8String2JString(JNIEnv* env, v8::String::Value& value) {
+  if (value.length() == 0) {
+    return env->NewStringUTF("");  // 降级到使用NewStringUTF来创建一个""字符串
   } else {
-    assert(!tryCatch.HasCaught());
+    return env->NewString(*value, value.length());
   }
+}
 
-  LOGE("run with cache!");
+#ifdef V8CORE_U3
+void setJSFVersion(JNIEnv* env) {
+  v8::HandleScope handleScope;
+  v8::Isolate::Scope isolate_scope(globalIsolate);
+  v8::Context::Scope ctx_scope(V8context);
+  // v8::TryCatch try_catch;
+
+  v8::Handle<v8::Object> global = V8context->Global();
+  v8::Handle<v8::Function> getJSFMVersion;
+  v8::Handle<v8::Value> version;
+  getJSFMVersion = v8::Handle<v8::Function>::Cast(
+      global->Get(v8::String::New("getJSFMVersion")));
+  version = getJSFMVersion->Call(global, 0, NULL);
+  v8::String::Utf8Value str(version);
+
+  jmethodID tempMethodId = env->GetMethodID(jBridgeClazz, "setJSFrmVersion",
+                                            "(Ljava/lang/String;)V");
+  LOGA("init JSFrm version %s", ToCString(str));
+  jstring jversion = env->NewStringUTF(*str);
+  env->CallVoidMethod(jThis, tempMethodId, jversion);
+  env->DeleteLocalRef(jversion);
+}
+#elif defined(V8CORE_U4)
+void setJSFVersion(JNIEnv* env) {
+  v8::Isolate* isolate = globalIsolate;
+  v8::HandleScope handleScope(isolate);
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  v8::Context::Scope ctx_scope(context);
+
+  v8::Handle<v8::Object> global = context->Global();
+  v8::Handle<v8::Function> getJSFMVersion;
+  v8::Handle<v8::Value> version;
+  getJSFMVersion = v8::Handle<v8::Function>::Cast(
+      global->Get(v8::String::NewFromUtf8(isolate, "getJSFMVersion")));
+  version = getJSFMVersion->Call(global, 0, NULL);
+  v8::String::Utf8Value str(version);
+
+  jmethodID tempMethodId = (env)->GetMethodID(jBridgeClazz, "setJSFrmVersion",
+                                              "(Ljava/lang/String;)V");
+  LOGA("init JSFrm version %s", ToCString(str));
+  jstring jversion = (env)->NewStringUTF(*str);
+  (env)->CallVoidMethod(jThis, tempMethodId, jversion);
+  env->DeleteLocalRef(jversion);
+}
+#endif
+
+jint native_execJSService(JNIEnv* env, jobject object, jstring script) {
+  if (script != NULL) {
+    const char* scriptStr = env->GetStringUTFChars(script, NULL);
+    v8::HandleScope handleScope(globalIsolate);
+#ifdef V8CORE_U3
+    v8::Handle<v8::String> source = v8::String::New(scriptStr);
+    base::debug::TraceScope traceScope("weex", "execJSService");
+#elif defined(V8CORE_U4)
+    v8::Handle<v8::String> source =
+        v8::String::NewFromUtf8(globalIsolate, scriptStr);
+    base::debug::TraceScope traceScope("weex", "execJSService");
+#endif
+    if (scriptStr == NULL || !ExecuteJavaScript(globalIsolate, source, true)) {
+      LOGE("jsLog JNI_Error >>> scriptStr :%s", scriptStr);
+      return false;
+    }
+    env->ReleaseStringUTFChars(script, scriptStr);
+    return true;
+  }
+  return false;
+}
+
+void native_takeHeapSnapshot(JNIEnv* env, jobject object, jstring name) {
+  if (NULL == name) return;
+
+  const char* nameStr = (env)->GetStringUTFChars(name, NULL);
+  if (NULL != nameStr) {
+    // const jclass cls = (env)->GetObjectClass(name);
+    jclass cls = (env)->FindClass("java/lang/String");
+    jmethodID mid =
+        (env)->GetMethodID(cls, "getBytes", "(Ljava/lang/String;)[B");
+    jstring charsetName = (env)->NewStringUTF("utf-8");
+    jbyteArray bytes =
+        (jbyteArray)(env)->CallObjectMethod(name, mid, charsetName);
+    jsize length = (env)->GetArrayLength(bytes);
+    jbyte* pBytes = (env)->GetByteArrayElements(bytes, JNI_FALSE);
+
+    char* filename = NULL;
+    if (length > 0) {
+      filename = (char*)malloc(length + 1);
+      memcpy(filename, pBytes, length);
+      filename[length] = 0;
+    }
+
+    (env)->ReleaseByteArrayElements(bytes, pBytes, JNI_ABORT);
+    (env)->DeleteLocalRef(charsetName);
+    (env)->DeleteLocalRef(bytes);
+    (env)->ReleaseStringUTFChars(name, nameStr);
+
+    if (filename != NULL) {
+      takeHeapSnapshot(filename);
+      free(filename);
+      filename = NULL;
+    }
+  }
+}
+
+#ifdef V8CORE_U3
+jint native_initFramework(JNIEnv* env, jobject object, jstring script,
+                          jobject params) {
+  jThis = env->NewGlobalRef(object);
+
+#if defined(V8_SHARED_WEBCORE)
+  globalIsolate = v8::Isolate::New();
+  globalIsolate->Enter();
+#else
+  // no flush to avoid SIGILL
+  // const char* str= "--noflush_code_incrementally --noflush_code
+  // --noage_code";
+  const char* str =
+      "--noflush_code --noage_code --nocompact_code_space"
+      " --expose_gc";
+  v8::V8::SetFlagsFromString(str, strlen(str));
+
+  v8::V8::Initialize();
+  globalIsolate = v8::Isolate::GetCurrent();
+#endif
+  globalIsolate->SetEventLogger(timerTraceProfilerInMainThread);
+  using base::debug::TraceEvent;
+  TraceEvent::StartATrace(env);
+  base::debug::TraceScope traceScope("weex", "initFramework");
+
+  v8::HandleScope handleScope(globalIsolate);
+
+  WXEnvironment = v8::ObjectTemplate::New();
+
+  jclass c_params = env->GetObjectClass(params);
+
+  jmethodID m_platform =
+      env->GetMethodID(c_params, "getPlatform", "()Ljava/lang/String;");
+  jobject platform = env->CallObjectMethod(params, m_platform);
+  WXEnvironment->Set("platform", jString2V8String(env, (jstring)platform));
+  env->DeleteLocalRef(platform);
+
+  jmethodID m_osVersion =
+      env->GetMethodID(c_params, "getOsVersion", "()Ljava/lang/String;");
+  jobject osVersion = env->CallObjectMethod(params, m_osVersion);
+  WXEnvironment->Set("osVersion", jString2V8String(env, (jstring)osVersion));
+  env->DeleteLocalRef(osVersion);
+
+  jmethodID m_appVersion =
+      env->GetMethodID(c_params, "getAppVersion", "()Ljava/lang/String;");
+  jobject appVersion = env->CallObjectMethod(params, m_appVersion);
+  WXEnvironment->Set("appVersion", jString2V8String(env, (jstring)appVersion));
+  env->DeleteLocalRef(appVersion);
+
+  jmethodID m_weexVersion =
+      env->GetMethodID(c_params, "getWeexVersion", "()Ljava/lang/String;");
+  jobject weexVersion = env->CallObjectMethod(params, m_weexVersion);
+  WXEnvironment->Set("weexVersion",
+                     jString2V8String(env, (jstring)weexVersion));
+  env->DeleteLocalRef(weexVersion);
+
+  jmethodID m_deviceModel =
+      env->GetMethodID(c_params, "getDeviceModel", "()Ljava/lang/String;");
+  jobject deviceModel = env->CallObjectMethod(params, m_deviceModel);
+  WXEnvironment->Set("deviceModel",
+                     jString2V8String(env, (jstring)deviceModel));
+  env->DeleteLocalRef(deviceModel);
+
+  jmethodID m_appName =
+      env->GetMethodID(c_params, "getAppName", "()Ljava/lang/String;");
+  jobject appName = env->CallObjectMethod(params, m_appName);
+  WXEnvironment->Set("appName", jString2V8String(env, (jstring)appName));
+  env->DeleteLocalRef(appName);
+
+  jmethodID m_deviceWidth =
+      env->GetMethodID(c_params, "getDeviceWidth", "()Ljava/lang/String;");
+  jobject deviceWidth = env->CallObjectMethod(params, m_deviceWidth);
+  WXEnvironment->Set("deviceWidth",
+                     jString2V8String(env, (jstring)deviceWidth));
+  env->DeleteLocalRef(deviceWidth);
+
+  jmethodID m_deviceHeight =
+      env->GetMethodID(c_params, "getDeviceHeight", "()Ljava/lang/String;");
+  jobject deviceHeight = env->CallObjectMethod(params, m_deviceHeight);
+  WXEnvironment->Set("deviceHeight",
+                     jString2V8String(env, (jstring)deviceHeight));
+  env->DeleteLocalRef(deviceHeight);
+
+  jmethodID m_options =
+      env->GetMethodID(c_params, "getOptions", "()Ljava/lang/Object;");
+  jobject options = env->CallObjectMethod(params, m_options);
+  jclass jmapclass = env->FindClass("java/util/HashMap");
+  jmethodID jkeysetmid =
+      env->GetMethodID(jmapclass, "keySet", "()Ljava/util/Set;");
+  jmethodID jgetmid = env->GetMethodID(
+      jmapclass, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+  jobject jsetkey = env->CallObjectMethod(options, jkeysetmid);
+  jclass jsetclass = env->FindClass("java/util/Set");
+  jmethodID jtoArraymid =
+      env->GetMethodID(jsetclass, "toArray", "()[Ljava/lang/Object;");
+  jobjectArray jobjArray =
+      (jobjectArray)env->CallObjectMethod(jsetkey, jtoArraymid);
+  env->DeleteLocalRef(jsetkey);
+  if (jobjArray != NULL) {
+    jsize arraysize = env->GetArrayLength(jobjArray);
+    for (int i = 0; i < arraysize; i++) {
+      jstring jkey = (jstring)env->GetObjectArrayElement(jobjArray, i);
+      jstring jvalue = (jstring)env->CallObjectMethod(options, jgetmid, jkey);
+      if (jkey != NULL) {
+        const char* c_key = env->GetStringUTFChars(jkey, NULL);
+        WXEnvironment->Set(c_key, jString2V8String(env, jvalue));
+        env->DeleteLocalRef(jkey);
+        if (jvalue != NULL) {
+          env->DeleteLocalRef(jvalue);
+        }
+      }
+    }
+    env->DeleteLocalRef(jobjArray);
+  }
+  env->DeleteLocalRef(options);
+
+  resetIdleNotificationCount();
+
+  V8context = CreateShellContext();
+  if (script != NULL) {
+    const char* scriptStr = env->GetStringUTFChars(script, NULL);
+    if (scriptStr == NULL ||
+        !ExecuteJavaScript(globalIsolate, v8::String::New(scriptStr), true)) {
+      return false;
+    }
+
+    setJSFVersion(env);
+    env->ReleaseStringUTFChars(script, scriptStr);
+  }
+  env->DeleteLocalRef(c_params);
   return true;
 }
+#elif defined(V8CORE_U4)
+jint native_initFramework(JNIEnv* env, jobject object, jstring script,
+                          jobject params) {
+  jThis = env->NewGlobalRef(object);
+  jclass c_params = env->GetObjectClass(params);
+#if defined(V8_SHARED_WEBCORE)
+  globalIsolate = v8::Isolate::New();
+  globalIsolate->Enter();
+#else
+  // no flush to avoid SIGILL
+  // const char* str= "--noflush_code_incrementally --noflush_code
+  // --noage_code";
+  const char* str =
+      "--noflush_code --noage_code --nocompact_code_space"
+      " --expose_gc";
+  v8::V8::SetFlagsFromString(str, strlen(str));
 
-extern "C" {
+  // The embedder needs to tell v8 whether needs to
+  // call 'v8::V8::InitializePlatform' with a new v8 platform.
+  jmethodID jNeedInitV8Id =
+      env->GetMethodID(c_params, "getNeedInitV8", "()Ljava/lang/String;");
+  jstring jNeedInitV8Str =
+      (jstring)env->CallObjectMethod(params, jNeedInitV8Id);
+  const char* c_needInitV8Str = env->GetStringUTFChars(jNeedInitV8Str, NULL);
+  if (!v8_platform_inited && c_needInitV8Str != NULL &&
+      !strcmp(c_needInitV8Str, "1")) {
+    v8::Platform* v8_platform = v8::platform::CreateV8DefaultPlatform();
+    v8::V8::InitializePlatform(v8_platform);
+    v8_platform_inited = true;
+  }
 
-jint Java_com_taobao_weex_bridge_WXBridge_initFramework(JNIEnv* env,
-                                                        jobject object,
-                                                        jstring script,
-                                                        jobject params) {
-  jThis = (env)->NewGlobalRef(object);
-  v8::Platform* v8platform = v8::platform::CreateDefaultPlatform();
-  v8::V8::InitializePlatform(v8platform);
   v8::V8::Initialize();
-  g_platform = v8platform;
-  v8::Isolate::CreateParams create_params;
-  create_params.array_buffer_allocator =
-      v8::ArrayBuffer::Allocator::NewDefaultAllocator();
-  g_array_buffer_allocator = create_params.array_buffer_allocator;
-  v8::Isolate* isolate = v8::Isolate::New(create_params);
-  globalIsolate = isolate;
+  globalIsolate = v8::Isolate::New();
+  globalIsolate->Enter();
+#endif
+  globalIsolate->SetEventLogger(timerTraceProfilerInMainThread);
+  using base::debug::TraceEvent;
+  TraceEvent::StartATrace(env);
+  v8::Isolate* isolate = globalIsolate;
+  base::debug::TraceScope traceScope("weex", "initFramework");
   v8::HandleScope handleScope(isolate);
 
   WXEnvironment = v8::ObjectTemplate::New(isolate);
-
-  jclass c_params = env->GetObjectClass(params);
 
   jmethodID m_platform =
       env->GetMethodID(c_params, "getPlatform", "()Ljava/lang/String;");
@@ -186,6 +504,7 @@ jint Java_com_taobao_weex_bridge_WXBridge_initFramework(JNIEnv* env,
   jobject appName = env->CallObjectMethod(params, m_appName);
   WXEnvironment->Set(v8::String::NewFromUtf8(isolate, "appName"),
                      jString2V8String(env, (jstring)appName));
+  env->DeleteLocalRef(appName);
 
   jmethodID m_deviceWidth =
       env->GetMethodID(c_params, "getDeviceWidth", "()Ljava/lang/String;");
@@ -201,69 +520,211 @@ jint Java_com_taobao_weex_bridge_WXBridge_initFramework(JNIEnv* env,
                      jString2V8String(env, (jstring)deviceHeight));
   env->DeleteLocalRef(deviceHeight);
 
+  jmethodID m_options =
+      env->GetMethodID(c_params, "getOptions", "()Ljava/lang/Object;");
+  jobject options = env->CallObjectMethod(params, m_options);
+  jclass jmapclass = env->FindClass("java/util/HashMap");
+  jmethodID jkeysetmid =
+      env->GetMethodID(jmapclass, "keySet", "()Ljava/util/Set;");
+  jmethodID jgetmid = env->GetMethodID(
+      jmapclass, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+  jobject jsetkey = env->CallObjectMethod(options, jkeysetmid);
+  jclass jsetclass = env->FindClass("java/util/Set");
+  jmethodID jtoArraymid =
+      env->GetMethodID(jsetclass, "toArray", "()[Ljava/lang/Object;");
+  jobjectArray jobjArray =
+      (jobjectArray)env->CallObjectMethod(jsetkey, jtoArraymid);
+  env->DeleteLocalRef(jsetkey);
+  if (jobjArray != NULL) {
+    jsize arraysize = env->GetArrayLength(jobjArray);
+    for (int i = 0; i < arraysize; i++) {
+      jstring jkey = (jstring)env->GetObjectArrayElement(jobjArray, i);
+      jstring jvalue = (jstring)env->CallObjectMethod(options, jgetmid, jkey);
+      if (jkey != NULL) {
+        const char* c_key = env->GetStringUTFChars(jkey, NULL);
+        WXEnvironment->Set(v8::String::NewFromUtf8(isolate, c_key),
+                           jString2V8String(env, jvalue));
+        env->DeleteLocalRef(jkey);
+        if (jvalue != NULL) {
+          env->DeleteLocalRef(jvalue);
+        }
+      }
+    }
+    env->DeleteLocalRef(jobjArray);
+  }
+  env->DeleteLocalRef(options);
+
+  resetIdleNotificationCount();
+
   V8context.Reset(isolate, CreateShellContext());
 
-  const char* scriptStr = (env)->GetStringUTFChars(script, NULL);
-  if (scriptStr == NULL) {
-    return false;
-  }
-  bool retValue = true;
-  if (!RunFromCache(globalIsolate, scriptStr)) {
-    LOGE("failed run with cache!");
-    if (!ExecuteJavaScript(globalIsolate,
-                           v8::String::NewFromUtf8(globalIsolate, scriptStr),
-                           true)) {
-      retValue = false;
+  if (script != NULL) {
+    const char* scriptStr = env->GetStringUTFChars(script, NULL);
+    if (scriptStr == NULL ||
+        !ExecuteJavaScript(globalIsolate,
+                           v8::String::NewFromUtf8(isolate, scriptStr), true)) {
+      return false;
     }
-  }
-  env->ReleaseStringUTFChars(script, scriptStr);
 
+    setJSFVersion(env);
+    env->ReleaseStringUTFChars(script, scriptStr);
+  }
   env->DeleteLocalRef(c_params);
-  return retValue;
+
+  return true;
 }
+#endif
 
 /**
  * Called to execute JavaScript such as . createInstance(),destroyInstance ext.
  *
  */
-jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
-                                                 jobject this1,
-                                                 jstring jinstanceid,
-                                                 jstring jnamespace,
-                                                 jstring jfunction,
-                                                 jobjectArray jargs) {
-  v8::Isolate* isolate = globalIsolate;
-  v8::HandleScope handleScope(isolate);
-  v8::Local<v8::Context> context(V8context.Get(isolate));
+#ifdef V8CORE_U3
+jint native_execJS(JNIEnv* env, jobject jthis, jstring jinstanceid,
+                   jstring jnamespace, jstring jfunction, jobjectArray jargs) {
+  v8::HandleScope handleScope;
   v8::Isolate::Scope isolate_scope(globalIsolate);
-  v8::Context::Scope ctx_scope(context);
+  v8::Context::Scope ctx_scope(V8context);
   v8::TryCatch try_catch;
-  int length = env->GetArrayLength(jargs);
-  v8::Local<v8::Value> obj[length];
 
-  jclass jsObjectClazz = (env)->FindClass("com/taobao/weex/bridge/WXJSObject");
+  if (jfunction == NULL || jinstanceid == NULL) {
+    LOGE("native_execJS function is NULL");
+    return false;
+  }
+
+  int length = 0;
+  if (jargs != NULL) {
+    length = env->GetArrayLength(jargs);
+  }
+  v8::Handle<v8::Value> obj[length > 0 ? length : 1];
+
+  jclass jsObjectClazz = env->FindClass("com/taobao/weex/bridge/WXJSObject");
   for (int i = 0; i < length; i++) {
-    jobject jArg = (env)->GetObjectArrayElement(jargs, i);
+    jobject jArg = env->GetObjectArrayElement(jargs, i);
 
-    jfieldID jTypeId = (env)->GetFieldID(jsObjectClazz, "type", "I");
+    jfieldID jTypeId = env->GetFieldID(jsObjectClazz, "type", "I");
     jint jTypeInt = env->GetIntField(jArg, jTypeId);
 
     jfieldID jDataId =
-        (env)->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
+        env->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
     jobject jDataObj = env->GetObjectField(jArg, jDataId);
     if (jTypeInt == 1) {
-      jclass jDoubleClazz = (env)->FindClass("java/lang/Double");
-      jmethodID jDoubleValueId =
-          (env)->GetMethodID(jDoubleClazz, "doubleValue", "()D");
-      jdouble jDoubleObj = (env)->CallDoubleMethod(jDataObj, jDoubleValueId);
-      obj[i] = v8::Number::New(isolate, (double)jDoubleObj);
-      env->DeleteLocalRef(jDoubleClazz);
+      if (jDoubleValueMethodId == NULL) {
+        jclass jDoubleClazz = env->FindClass("java/lang/Double");
+        jDoubleValueMethodId =
+            env->GetMethodID(jDoubleClazz, "doubleValue", "()D");
+        env->DeleteLocalRef(jDoubleClazz);
+      }
+      jdouble jDoubleObj =
+          env->CallDoubleMethod(jDataObj, jDoubleValueMethodId);
+      obj[i] = v8::Number::New((double)jDoubleObj);
+
     } else if (jTypeInt == 2) {
       jstring jDataStr = (jstring)jDataObj;
       obj[i] = jString2V8String(env, jDataStr);
     } else if (jTypeInt == 3) {
+      v8::TryCatch try_catch;
+      v8::Handle<v8::Value> jsonObj[1];
+      v8::Handle<v8::Object> global = V8context->Global();
+      json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+      json_parse =
+          v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("parse")));
+      jsonObj[0] = jString2V8String(env, (jstring)jDataObj);
+      v8::Handle<v8::Value> ret = json_parse->Call(json, 1, jsonObj);
+      obj[i] = ret;
+      if (try_catch.HasCaught()) {
+        v8::String::Utf8Value utf8Obj(jsonObj[0]->ToString());
+        ReportException(globalIsolate, &try_catch, jinstanceid,
+                        ToCString(utf8Obj));
+        env->DeleteLocalRef(jDataObj);
+        env->DeleteLocalRef(jArg);
+        env->DeleteLocalRef(jsObjectClazz);
+        return false;
+      }
+    }
+    env->DeleteLocalRef(jDataObj);
+    env->DeleteLocalRef(jArg);
+  }
+  env->DeleteLocalRef(jsObjectClazz);
+
+  const char* func = env->GetStringUTFChars(jfunction, 0);
+  base::debug::TraceScope traceScope("weex", "exeJS", "function", func);
+
+  v8::Handle<v8::Object> global = V8context->Global();
+  v8::Handle<v8::Function> function;
+  v8::Handle<v8::Value> result;
+  if (jnamespace == NULL) {
+    function =
+        v8::Handle<v8::Function>::Cast(global->Get(v8::String::New(func)));
+    result = function->Call(global, length, obj);
+  } else {
+    v8::Handle<v8::Object> master = v8::Handle<v8::Object>::Cast(
+        global->Get(jString2V8String(env, jnamespace)));
+    function = v8::Handle<v8::Function>::Cast(
+        master->Get(jString2V8String(env, jfunction)));
+    result = function->Call(master, length, obj);
+  }
+
+  makeIdleNotification(globalIsolate);
+
+  if (result.IsEmpty()) {
+    assert(try_catch.HasCaught());
+    ReportException(globalIsolate, &try_catch, jinstanceid, func);
+    env->ReleaseStringUTFChars(jfunction, func);
+    return false;
+  }
+  env->ReleaseStringUTFChars(jfunction, func);
+  return true;
+}
+#elif defined(V8CORE_U4)
+jint native_execJS(JNIEnv* env, jobject jthis, jstring jinstanceid,
+                   jstring jnamespace, jstring jfunction, jobjectArray jargs) {
+  v8::Isolate* isolate = globalIsolate;
+  v8::HandleScope handleScope(isolate);
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  v8::Context::Scope ctx_scope(context);
+  v8::Local<v8::Object> global = context->Global();
+
+  v8::TryCatch try_catch;
+
+  if (jfunction == NULL || jinstanceid == NULL) {
+    LOGE("execJS function is NULL!");
+    return false;
+  }
+  int length = 0;
+  if (jargs != NULL) {
+    length = env->GetArrayLength(jargs);
+  }
+  v8::Handle<v8::Value> obj[length ? length : 1];
+
+  jclass jsObjectClazz = env->FindClass("com/taobao/weex/bridge/WXJSObject");
+  for (int i = 0; i < length; i++) {
+    jobject jArg = env->GetObjectArrayElement(jargs, i);
+
+    jfieldID jTypeId = env->GetFieldID(jsObjectClazz, "type", "I");
+    jint jTypeInt = env->GetIntField(jArg, jTypeId);
+
+    jfieldID jDataId =
+        env->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
+    jobject jDataObj = env->GetObjectField(jArg, jDataId);
+    if (jTypeInt == 1) {
+      if (jDoubleValueMethodId == NULL) {
+        jclass jDoubleClazz = env->FindClass("java/lang/Double");
+        jDoubleValueMethodId =
+            env->GetMethodID(jDoubleClazz, "doubleValue", "()D");
+        env->DeleteLocalRef(jDoubleClazz);
+      }
+      jdouble jDoubleObj =
+          env->CallDoubleMethod(jDataObj, jDoubleValueMethodId);
+      obj[i] = v8::Number::New(isolate, (double)jDoubleObj);
+    } else if (jTypeInt == 2) {
+      jstring jDataStr = (jstring)jDataObj;
+      obj[i] = jString2V8String(env, jDataStr);
+    } else if (jTypeInt == 3) {
+      v8::TryCatch try_catch;
       v8::Local<v8::Value> jsonObj[1];
-      v8::Local<v8::Object> global = context->Global();
       json = v8::Local<v8::Object>::Cast(
           global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
       json_parse = v8::Local<v8::Function>::Cast(
@@ -271,16 +732,25 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
       jsonObj[0] = jString2V8String(env, (jstring)jDataObj);
       v8::Local<v8::Value> ret = json_parse->Call(json, 1, jsonObj);
       obj[i] = ret;
+      if (try_catch.HasCaught()) {
+        v8::String::Utf8Value utf8Obj(jsonObj[0]->ToString());
+        ReportException(globalIsolate, &try_catch, jinstanceid,
+                        ToCString(utf8Obj));
+        env->DeleteLocalRef(jDataObj);
+        env->DeleteLocalRef(jArg);
+        env->DeleteLocalRef(jsObjectClazz);
+        return false;
+      }
     }
     env->DeleteLocalRef(jDataObj);
     env->DeleteLocalRef(jArg);
   }
   env->DeleteLocalRef(jsObjectClazz);
 
-  const char* func = (env)->GetStringUTFChars(jfunction, 0);
-  v8::Local<v8::Object> global = context->Global();
-  v8::Local<v8::Function> function;
-  v8::Local<v8::Value> result;
+  const char* func = env->GetStringUTFChars(jfunction, 0);
+  v8::Handle<v8::Function> function;
+  base::debug::TraceScope traceScope("weex", "exeJS", "function", func);
+  v8::Handle<v8::Value> result;
   if (jnamespace == NULL) {
     function = v8::Local<v8::Function>::Cast(
         global->Get(v8::String::NewFromUtf8(isolate, func)));
@@ -292,45 +762,85 @@ jint Java_com_taobao_weex_bridge_WXBridge_execJS(JNIEnv* env,
         master->Get(jString2V8String(env, jfunction)));
     result = function->Call(master, length, obj);
   }
+
+  makeIdleNotification(isolate);
+
   if (result.IsEmpty()) {
     assert(try_catch.HasCaught());
     ReportException(globalIsolate, &try_catch, jinstanceid, func);
     env->ReleaseStringUTFChars(jfunction, func);
-    env->DeleteLocalRef(jfunction);
     return false;
   }
   env->ReleaseStringUTFChars(jfunction, func);
   return true;
 }
+#endif
 }
+
+#ifdef V8CORE_U4
+static void compileAndRunBundle(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  if (args[0].IsEmpty() || !args[0]->IsString() || args[1].IsEmpty() ||
+      !args[1]->IsString() || args[2].IsEmpty() || !args[2]->IsString() ||
+      args[3].IsEmpty() || !args[3]->IsString()) {
+    return;
+  }
+  base::debug::TraceScope traceScope("weex", "compileAndRunBundle");
+
+  v8::Isolate* isolate = globalIsolate;
+  v8::HandleScope handleScope(isolate);
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  v8::Context::Scope ctx_scope(context);
+
+  v8::Handle<v8::String> code = args[0]->ToString();
+  v8::Handle<v8::String> name = args[1]->ToString();
+  v8::Handle<v8::String> digest = args[2]->ToString();
+  v8::Handle<v8::String> codeCachePath = args[3]->ToString();
+
+  v8::Local<v8::Value> result;
+  {
+    result = weex::V8ScriptRunner::compileAndRunScript(
+        isolate, context, code, name, digest, codeCachePath);
+  }
+
+  args.GetReturnValue().Set(result);
+}
+#endif
 
 /**
  * this function is to execute a section of JavaScript content.
  */
-static bool ExecuteJavaScript(v8::Isolate* isolate,
-                              v8::Local<v8::String> source,
-                              bool report_exceptions) {
+bool ExecuteJavaScript(v8::Isolate* isolate, v8::Handle<v8::String> source,
+                       bool report_exceptions) {
   v8::Isolate::Scope isolate_scope(isolate);
-  v8::Local<v8::Context> context(V8context.Get(isolate));
+#ifdef V8CORE_U3
+  v8::Context::Scope ctx_scope(V8context);
+#elif defined(V8CORE_U4)
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
   v8::Context::Scope ctx_scope(context);
+#endif
   v8::TryCatch try_catch;
   if (source.IsEmpty()) {
-    if (report_exceptions)
-      ReportException(isolate, &try_catch, NULL, "");
+    if (report_exceptions) ReportException(isolate, &try_catch, NULL, "");
     return false;
   }
+#ifdef V8CORE_U3
+  v8::Local<v8::String> name = v8::String::New("(weex)");
+#elif defined(V8CORE_U4)
   v8::Local<v8::String> name = v8::String::NewFromUtf8(isolate, "(weex)");
+#endif
   v8::Local<v8::Script> script = v8::Script::Compile(source, name);
   if (script.IsEmpty()) {
-    if (report_exceptions)
-      ReportException(isolate, &try_catch, NULL, "");
+    if (report_exceptions) ReportException(isolate, &try_catch, NULL, "");
     return false;
   } else {
     v8::Local<v8::Value> result = script->Run();
     if (result.IsEmpty()) {
       assert(try_catch.HasCaught());
-      if (report_exceptions)
-        ReportException(isolate, &try_catch, NULL, "");
+      if (report_exceptions) ReportException(isolate, &try_catch, NULL, "");
       return false;
     } else {
       assert(!try_catch.HasCaught());
@@ -339,17 +849,16 @@ static bool ExecuteJavaScript(v8::Isolate* isolate,
   }
 }
 
-static void reportException(jstring jInstanceId,
-                            const char* func,
-                            const char* exception_string) {
+void reportException(jstring jInstanceId, const char* func,
+                     const char* exception_string) {
   JNIEnv* env = getJNIEnv();
-  jstring jExceptionString = (env)->NewStringUTF(exception_string);
-  jstring jFunc = (env)->NewStringUTF(func);
-  jmethodID tempMethodId = (env)->GetMethodID(
+  jstring jExceptionString = env->NewStringUTF(exception_string);
+  jstring jFunc = env->NewStringUTF(func);
+  jmethodID tempMethodId = env->GetMethodID(
       jBridgeClazz, "reportJSException",
       "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-  (env)->CallVoidMethod(jThis, tempMethodId, jInstanceId, jFunc,
-                        jExceptionString);
+  env->CallVoidMethod(jThis, tempMethodId, jInstanceId, jFunc,
+                      jExceptionString);
   env->DeleteLocalRef(jExceptionString);
   env->DeleteLocalRef(jFunc);
 }
@@ -358,13 +867,11 @@ static void reportException(jstring jInstanceId,
  *  This Function will be called when any javascript Exception
  *  that need to print log to notify  native happened.
  */
-static void ReportException(v8::Isolate* isolate,
-                            v8::TryCatch* try_catch,
-                            jstring jinstanceid,
-                            const char* func) {
+void ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch,
+                     jstring jinstanceid, const char* func) {
   v8::HandleScope handle_scope(isolate);
   v8::String::Utf8Value exception(try_catch->Exception());
-  v8::Local<v8::Message> message = try_catch->Message();
+  v8::Handle<v8::Message> message = try_catch->Message();
   if (message.IsEmpty()) {
     // V8 didn't provide any extra information about this error; just
     // print the exception.
@@ -389,12 +896,83 @@ static void ReportException(v8::Isolate* isolate,
  *  This Function is a built-in function that JS bundle can execute
  *  to call native module.
  */
-static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Isolate* isolate = args.GetIsolate();
-  v8::Local<v8::Context> context(V8context.Get(isolate));
+#ifdef V8CORE_U3
+static v8::Handle<v8::Value> callNative(const v8::Arguments& args) {
+  base::debug::TraceScope traceScope("weex", "callNative");
+
   JNIEnv* env = getJNIEnv();
-  jstring jTaskString = NULL;
-  if (args[1]->IsObject()) {
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+  // task args[1]
+  jbyteArray jTaskString = NULL;
+  if (!args[1].IsEmpty() && args[1]->IsObject()) {
+    v8::Handle<v8::Value> obj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_stringify =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("stringify")));
+    obj[0] = args[1];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jTaskString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jTaskString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+    // jTaskString = env->NewStringUTF(ToCString(str));
+
+  } else if (!args[1].IsEmpty() && args[1]->IsString()) {
+    v8::String::Utf8Value tasks(args[1]);
+    int strLen = strlen(*tasks);
+    jTaskString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jTaskString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(*tasks));
+    // jTaskString = env->NewStringUTF(*tasks);
+  }
+  // callback args[2]
+  jstring jCallback = NULL;
+  if (!args[2].IsEmpty()) {
+    v8::String::Utf8Value callback(args[2]);
+    jCallback = env->NewStringUTF(*callback);
+  }
+
+  if (jCallNativeMethodId == NULL) {
+    jCallNativeMethodId =
+        env->GetMethodID(jBridgeClazz, "callNative",
+                         "(Ljava/lang/String;[BLjava/lang/String;)I");
+  }
+
+  int flag = env->CallIntMethod(jThis, jCallNativeMethodId, jInstanceId,
+                                jTaskString, jCallback);
+  if (flag == -1) {
+    LOGE("instance destroy JFM must stop callNative");
+  }
+  env->DeleteLocalRef(jTaskString);
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jCallback);
+
+  return v8::Integer::New(flag);
+}
+#elif defined(V8CORE_U4)
+static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  base::debug::TraceScope traceScope("weex", "callNative");
+  JNIEnv* env = getJNIEnv();
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+  // task args[1]
+  jbyteArray jTaskString = NULL;
+  if (!args[1].IsEmpty() && args[1]->IsObject()) {
     v8::Local<v8::Value> obj[1];
     v8::Local<v8::Object> global = context->Global();
     json = v8::Local<v8::Object>::Cast(
@@ -404,119 +982,841 @@ static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
     obj[0] = args[1];
     v8::Local<v8::Value> ret = json_stringify->Call(json, 1, obj);
     v8::String::Utf8Value str(ret);
-    jTaskString = (env)->NewStringUTF(ToCString(str));
-  } else if (args[1]->IsString()) {
-    v8::String::Utf8Value tasks(args[1]);
-    jTaskString = (env)->NewStringUTF(*tasks);
-  }
 
-  v8::String::Utf8Value instanceId(args[0]);
+    int strLen = strlen(ToCString(str));
+    jTaskString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jTaskString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  } else if (!args[1].IsEmpty() && args[1]->IsString()) {
+    v8::String::Utf8Value tasks(args[1]);
+    int strLen = strlen(*tasks);
+    jTaskString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jTaskString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(*tasks));
+  }
+  // callback args[2]
   jstring jCallback = NULL;
   if (!args[2].IsEmpty()) {
-    v8::String::Utf8Value instanceId(args[2]);
-    jCallback = (env)->NewStringUTF(*instanceId);
+    v8::String::Utf8Value callback(args[2]);
+    jCallback = env->NewStringUTF(*callback);
   }
-  jstring jInstanceId = (env)->NewStringUTF(*instanceId);
-  jmethodID tempMethodId = (env)->GetMethodID(
-      jBridgeClazz, "callNative",
-      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I");
-  int flag = (env)->CallIntMethod(jThis, tempMethodId, jInstanceId, jTaskString,
-                                  jCallback);
+
+  if (jCallNativeMethodId == NULL) {
+    jCallNativeMethodId =
+        env->GetMethodID(jBridgeClazz, "callNative",
+                         "(Ljava/lang/String;[BLjava/lang/String;)I");
+  }
+
+  int flag = env->CallIntMethod(jThis, jCallNativeMethodId, jInstanceId,
+                                jTaskString, jCallback);
   if (flag == -1) {
     LOGE("instance destroy JFM must stop callNative");
   }
-
   env->DeleteLocalRef(jTaskString);
   env->DeleteLocalRef(jInstanceId);
   env->DeleteLocalRef(jCallback);
 
   args.GetReturnValue().Set(v8::Integer::New(isolate, flag));
 }
+#endif
+
+/**
+ *  This Function is a built-in function that JS bundle can execute
+ *  to call native module.
+ *  String instanceId, String module, String method, Object[] arguments, Object
+ * options
+ */
+#ifdef V8CORE_U3
+v8::Handle<v8::Value> callNativeModule(const v8::Arguments& args) {
+  base::debug::TraceScope traceScope("weex", "callNativeModule");
+
+  JNIEnv* env = getJNIEnv();
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+
+  // module args[1]
+  jstring jmodule = NULL;
+  if (!args[1].IsEmpty()) {
+    v8::String::Utf8Value module(args[1]);
+    jmodule = env->NewStringUTF(*module);
+  }
+
+  // method args[2]
+  jstring jmethod = NULL;
+  if (!args[2].IsEmpty()) {
+    v8::String::Utf8Value method(args[2]);
+    jmethod = env->NewStringUTF(*method);
+  }
+
+  // arguments args[3]
+  jbyteArray jArgString = NULL;
+  if (!args[3].IsEmpty() && args[3]->IsObject()) {
+    v8::Handle<v8::Value> obj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_stringify =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("stringify")));
+    obj[0] = args[3];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jArgString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jArgString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+    // jTaskString = env->NewStringUTF(ToCString(str));
+  }
+
+  // arguments args[4]
+  jbyteArray jOptString = NULL;
+  if (!args[4].IsEmpty() && args[4]->IsObject()) {
+    v8::Handle<v8::Value> obj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_stringify =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("stringify")));
+    obj[0] = args[4];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jOptString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jOptString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  if (jCallNativeModuleMethodId == NULL) {
+    jCallNativeModuleMethodId =
+        env->GetMethodID(jBridgeClazz, "callNativeModule",
+                         "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/"
+                         "String;[B[B)Ljava/lang/Object;");
+  }
+
+  jobject result =
+      env->CallObjectMethod(jThis, jCallNativeModuleMethodId, jInstanceId,
+                            jmodule, jmethod, jArgString, jOptString);
+  v8::Handle<v8::Value> ret;
+
+  jclass jsObjectClazz = env->FindClass("com/taobao/weex/bridge/WXJSObject");
+
+  jfieldID jTypeId = env->GetFieldID(jsObjectClazz, "type", "I");
+  jint jTypeInt = env->GetIntField(result, jTypeId);
+  jfieldID jDataId =
+      env->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
+  jobject jDataObj = env->GetObjectField(result, jDataId);
+  if (jTypeInt == 1) {
+    if (jDoubleValueMethodId == NULL) {
+      jclass jDoubleClazz = env->FindClass("java/lang/Double");
+      jDoubleValueMethodId =
+          env->GetMethodID(jDoubleClazz, "doubleValue", "()D");
+      env->DeleteLocalRef(jDoubleClazz);
+    }
+    jdouble jDoubleObj = env->CallDoubleMethod(jDataObj, jDoubleValueMethodId);
+    ret = v8::Number::New((double)jDoubleObj);
+
+  } else if (jTypeInt == 2) {
+    jstring jDataStr = (jstring)jDataObj;
+    ret = jString2V8String(env, jDataStr);
+  } else if (jTypeInt == 3) {
+    v8::Handle<v8::Value> jsonObj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_parse =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("parse")));
+    jsonObj[0] = jString2V8String(env, (jstring)jDataObj);
+    ret = json_parse->Call(json, 1, jsonObj);
+  }
+  env->DeleteLocalRef(jDataObj);
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jmodule);
+  env->DeleteLocalRef(jmethod);
+  env->DeleteLocalRef(jArgString);
+  env->DeleteLocalRef(jOptString);
+  return ret;
+}
+#elif defined(V8CORE_U4)
+void callNativeModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  base::debug::TraceScope traceScope("weex", "callNativeModule");
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  JNIEnv* env = getJNIEnv();
+
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+
+  // module args[1]
+  jstring jmodule = NULL;
+  if (!args[1].IsEmpty()) {
+    v8::String::Utf8Value module(args[1]);
+    jmodule = env->NewStringUTF(*module);
+  }
+
+  // method args[2]
+  jstring jmethod = NULL;
+  if (!args[2].IsEmpty()) {
+    v8::String::Utf8Value method(args[2]);
+    jmethod = env->NewStringUTF(*method);
+  }
+
+  // arguments args[3]
+  jbyteArray jArgString = NULL;
+  if (!args[3].IsEmpty() && args[3]->IsObject()) {
+    v8::Local<v8::Value> obj[1];
+    v8::Local<v8::Object> global = context->Global();
+    json = v8::Handle<v8::Object>::Cast(
+        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+    json_stringify = v8::Local<v8::Function>::Cast(
+        json->Get(v8::String::NewFromUtf8(isolate, "stringify")));
+    obj[0] = args[3];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jArgString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jArgString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  // arguments args[4]
+  jbyteArray jOptString = NULL;
+  if (!args[4].IsEmpty() && args[4]->IsObject()) {
+    v8::Local<v8::Value> obj[1];
+    v8::Local<v8::Object> global = context->Global();
+    json = v8::Local<v8::Object>::Cast(
+        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+    json_stringify = v8::Local<v8::Function>::Cast(
+        json->Get(v8::String::NewFromUtf8(isolate, "stringify")));
+    obj[0] = args[4];
+    v8::Local<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jOptString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jOptString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  if (jCallNativeModuleMethodId == NULL) {
+    jCallNativeModuleMethodId =
+        env->GetMethodID(jBridgeClazz, "callNativeModule",
+                         "(Ljava/lang/String;"
+                         "Ljava/lang/String;"
+                         "Ljava/lang/String;"
+                         "[B"
+                         "[B)"
+                         "Ljava/lang/Object;");
+  }
+  jobject result =
+      env->CallObjectMethod(jThis, jCallNativeModuleMethodId, jInstanceId,
+                            jmodule, jmethod, jArgString, jOptString);
+  v8::Local<v8::Value> ret;
+
+  jclass jsObjectClazz = env->FindClass("com/taobao/weex/bridge/WXJSObject");
+  jfieldID jTypeId = env->GetFieldID(jsObjectClazz, "type", "I");
+  jint jTypeInt = env->GetIntField(result, jTypeId);
+  jfieldID jDataId =
+      env->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
+  jobject jDataObj = env->GetObjectField(result, jDataId);
+  if (jTypeInt == 1) {
+    if (jDoubleValueMethodId == NULL) {
+      jclass jDoubleClazz = env->FindClass("java/lang/Double");
+      jDoubleValueMethodId =
+          env->GetMethodID(jDoubleClazz, "doubleValue", "()D");
+      env->DeleteLocalRef(jDoubleClazz);
+    }
+    jdouble jDoubleObj = env->CallDoubleMethod(jDataObj, jDoubleValueMethodId);
+    ret = v8::Number::New(isolate, (double)jDoubleObj);
+
+  } else if (jTypeInt == 2) {
+    jstring jDataStr = (jstring)jDataObj;
+    ret = jString2V8String(env, jDataStr);
+  } else if (jTypeInt == 3) {
+    v8::Local<v8::Value> jsonObj[1];
+    v8::Local<v8::Object> global = context->Global();
+    json = v8::Handle<v8::Object>::Cast(
+        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+    json_parse = v8::Local<v8::Function>::Cast(
+        json->Get(v8::String::NewFromUtf8(isolate, "parse")));
+    jsonObj[0] = jString2V8String(env, (jstring)jDataObj);
+    ret = json_parse->Call(json, 1, jsonObj);
+  }
+  env->DeleteLocalRef(jDataObj);
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jmodule);
+  env->DeleteLocalRef(jmethod);
+  env->DeleteLocalRef(jArgString);
+  env->DeleteLocalRef(jOptString);
+  return args.GetReturnValue().Set(ret);
+}
+#endif
+
+/**
+ *  This Function is a built-in function that JS bundle can execute
+ *  to call native module.
+ *  String instanceId, String module, String method, Object[] arguments, Object
+ * options
+ */
+#ifdef V8CORE_U3
+v8::Handle<v8::Value> callNativeComponent(const v8::Arguments& args) {
+  base::debug::TraceScope traceScope("weex", "callNativeComponent");
+  JNIEnv* env = getJNIEnv();
+
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+
+  // module args[1]
+  jstring jcomponentRef = NULL;
+  if (!args[1].IsEmpty()) {
+    v8::String::Utf8Value componentRef(args[1]);
+    jcomponentRef = env->NewStringUTF(*componentRef);
+  }
+
+  // method args[2]
+  jstring jmethod = NULL;
+  if (!args[2].IsEmpty()) {
+    v8::String::Utf8Value method(args[2]);
+    jmethod = env->NewStringUTF(*method);
+  }
+
+  // arguments args[3]
+  jbyteArray jArgString = NULL;
+  if (!args[3].IsEmpty() && args[3]->IsObject()) {
+    v8::Handle<v8::Value> obj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_stringify =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("stringify")));
+    obj[0] = args[3];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jArgString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jArgString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  // arguments args[4]
+  jbyteArray jOptString = NULL;
+  if (!args[4].IsEmpty() && args[4]->IsObject()) {
+    v8::Handle<v8::Value> obj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_stringify =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("stringify")));
+    obj[0] = args[4];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jOptString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jOptString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  if (jCallNativeComponentMethodId == NULL) {
+    jCallNativeComponentMethodId = env->GetMethodID(
+        jBridgeClazz, "callNativeComponent",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B[B)V");
+  }
+
+  env->CallVoidMethod(jThis, jCallNativeComponentMethodId, jInstanceId,
+                      jcomponentRef, jmethod, jArgString, jOptString);
+
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jcomponentRef);
+  env->DeleteLocalRef(jmethod);
+  env->DeleteLocalRef(jArgString);
+  env->DeleteLocalRef(jOptString);
+  return v8::Boolean::New(true);
+}
+#elif defined(V8CORE_U4)
+void callNativeComponent(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  base::debug::TraceScope traceScope("weex", "callNativeComponent");
+
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  JNIEnv* env = getJNIEnv();
+
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+
+  // module args[1]
+  jstring jcomponentRef = NULL;
+  if (!args[1].IsEmpty()) {
+    v8::String::Utf8Value componentRef(args[1]);
+    jcomponentRef = env->NewStringUTF(*componentRef);
+  }
+
+  // method args[2]
+  jstring jmethod = NULL;
+  if (!args[2].IsEmpty()) {
+    v8::String::Utf8Value method(args[2]);
+    jmethod = env->NewStringUTF(*method);
+  }
+
+  // arguments args[3]
+  jbyteArray jArgString = NULL;
+  if (!args[3].IsEmpty() && args[3]->IsObject()) {
+    v8::Local<v8::Value> obj[1];
+    v8::Local<v8::Object> global = context->Global();
+    json = v8::Handle<v8::Object>::Cast(
+        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+    json_stringify = v8::Handle<v8::Function>::Cast(
+        json->Get(v8::String::NewFromUtf8(isolate, "stringify")));
+    obj[0] = args[3];
+    v8::Local<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jArgString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jArgString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  // arguments args[4]
+  jbyteArray jOptString = NULL;
+  if (!args[4].IsEmpty() && args[4]->IsObject()) {
+    v8::Local<v8::Value> obj[1];
+    v8::Local<v8::Object> global = context->Global();
+    json = v8::Handle<v8::Object>::Cast(
+        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+    json_stringify = v8::Handle<v8::Function>::Cast(
+        json->Get(v8::String::NewFromUtf8(isolate, "stringify")));
+    obj[0] = args[4];
+    v8::Local<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jOptString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jOptString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  }
+
+  if (jCallNativeComponentMethodId == NULL) {
+    jCallNativeComponentMethodId =
+        env->GetMethodID(jBridgeClazz, "callNativeComponent",
+                         "(Ljava/lang/String;"
+                         "Ljava/lang/String;"
+                         "Ljava/lang/String;"
+                         "[B"
+                         "[B)"
+                         "V");
+  }
+
+  env->CallVoidMethod(jThis, jCallNativeComponentMethodId, jInstanceId,
+                      jcomponentRef, jmethod, jArgString, jOptString);
+
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jcomponentRef);
+  env->DeleteLocalRef(jmethod);
+  env->DeleteLocalRef(jArgString);
+  env->DeleteLocalRef(jOptString);
+  args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+}
+#endif
+
+/**
+ *  This Function is a built-in function that JS bundle can execute
+ *  to call native module.
+ */
+#ifdef V8CORE_U3
+v8::Handle<v8::Value> callAddElement(const v8::Arguments& args) {
+  base::debug::TraceScope traceScope("weex", "callAddElement");
+  JNIEnv* env = getJNIEnv();
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+  // instacneID args[1]
+  jstring jref = NULL;
+  if (!args[1].IsEmpty()) {
+    v8::String::Utf8Value ref(args[1]);
+    jref = env->NewStringUTF(*ref);
+  }
+  // dom node args[2]
+  jbyteArray jdomString = NULL;
+  if (!args[2].IsEmpty() && args[2]->IsObject()) {
+    v8::Handle<v8::Value> obj[1];
+    v8::Handle<v8::Object> global = V8context->Global();
+    json = v8::Handle<v8::Object>::Cast(global->Get(v8::String::New("JSON")));
+    json_stringify =
+        v8::Handle<v8::Function>::Cast(json->Get(v8::String::New("stringify")));
+    obj[0] = args[2];
+    v8::Handle<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jdomString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jdomString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+
+    //      jdomString = env->NewStringUTF(ToCString(str));
+
+  } else if (!args[2].IsEmpty() && args[2]->IsString()) {
+    v8::String::Utf8Value tasks(args[2]);
+
+    int strLen = strlen(*tasks);
+    jdomString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jdomString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(*tasks));
+
+    // jdomString = env->NewStringUTF(*tasks);
+  }
+  // index  args[3]
+  jstring jindex = NULL;
+  if (!args[3].IsEmpty()) {
+    v8::String::Utf8Value index(args[3]);
+    jindex = env->NewStringUTF(*index);
+  }
+  // callback  args[4]
+  jstring jCallback = NULL;
+  if (!args[4].IsEmpty()) {
+    v8::String::Utf8Value callback(args[4]);
+    jCallback = env->NewStringUTF(*callback);
+  }
+  if (jCallAddElementMethodId == NULL) {
+    jCallAddElementMethodId =
+        env->GetMethodID(jBridgeClazz, "callAddElement",
+                         "(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/"
+                         "String;Ljava/lang/String;)I");
+  }
+
+  int flag = env->CallIntMethod(jThis, jCallAddElementMethodId, jInstanceId,
+                                jref, jdomString, jindex, jCallback);
+  if (flag == -1) {
+    LOGE("instance destroy JFM must stop callNative");
+  }
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jref);
+  env->DeleteLocalRef(jdomString);
+  env->DeleteLocalRef(jindex);
+  env->DeleteLocalRef(jCallback);
+  return v8::Integer::New(flag);
+}
+#elif defined(V8CORE_U4)
+void callAddElement(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  base::debug::TraceScope traceScope("weex", "callAddElement");
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::Local<v8::Context> context =
+      v8::Local<v8::Context>::New(isolate, V8context);
+  JNIEnv* env = getJNIEnv();
+
+  // instacneID args[0]
+  jstring jInstanceId = NULL;
+  if (!args[0].IsEmpty()) {
+    v8::String::Utf8Value instanceId(args[0]);
+    jInstanceId = env->NewStringUTF(*instanceId);
+  }
+  // instacneID args[1]
+  jstring jref = NULL;
+  if (!args[1].IsEmpty()) {
+    v8::String::Utf8Value ref(args[1]);
+    jref = env->NewStringUTF(*ref);
+  }
+  // dom node args[2]
+  jbyteArray jdomString = NULL;
+  if (!args[2].IsEmpty() && args[2]->IsObject()) {
+    v8::Local<v8::Value> obj[1];
+    v8::Local<v8::Object> global = context->Global();
+    json = v8::Handle<v8::Object>::Cast(
+        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+    json_stringify = v8::Handle<v8::Function>::Cast(
+        json->Get(v8::String::NewFromUtf8(isolate, "stringify")));
+    obj[0] = args[2];
+    v8::Local<v8::Value> ret = json_stringify->Call(json, 1, obj);
+    v8::String::Utf8Value str(ret);
+
+    int strLen = strlen(ToCString(str));
+    jdomString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jdomString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(ToCString(str)));
+  } else if (args[2].IsEmpty() && args[2]->IsString()) {
+    v8::String::Utf8Value tasks(args[2]);
+
+    int strLen = strlen(*tasks);
+    jdomString = env->NewByteArray(strLen);
+    env->SetByteArrayRegion(jdomString, 0, strLen,
+                            reinterpret_cast<const jbyte*>(*tasks));
+  }
+  // index  args[3]
+  jstring jindex = NULL;
+  if (!args[3].IsEmpty()) {
+    v8::String::Utf8Value index(args[3]);
+    jindex = env->NewStringUTF(*index);
+  }
+  // callback  args[4]
+  jstring jCallback = NULL;
+  if (!args[4].IsEmpty()) {
+    v8::String::Utf8Value callback(args[4]);
+    jCallback = env->NewStringUTF(*callback);
+  }
+  if (jCallAddElementMethodId == NULL) {
+    jCallAddElementMethodId = env->GetMethodID(jBridgeClazz, "callAddElement",
+                                               "(Ljava/lang/String;"
+                                               "Ljava/lang/String;"
+                                               "[B"
+                                               "Ljava/lang/String;"
+                                               "Ljava/lang/String;)"
+                                               "I");
+  }
+
+  int flag = env->CallIntMethod(jThis, jCallAddElementMethodId, jInstanceId,
+                                jref, jdomString, jindex, jCallback);
+  if (flag == -1) {
+    LOGE("instance destroy JFM must stop callNative");
+  }
+  env->DeleteLocalRef(jInstanceId);
+  env->DeleteLocalRef(jref);
+  env->DeleteLocalRef(jdomString);
+  env->DeleteLocalRef(jindex);
+  env->DeleteLocalRef(jCallback);
+  args.GetReturnValue().Set(v8::Integer::New(isolate, flag));
+}
+#endif
 
 /**
  * set time out function
  */
-static void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
+#ifdef V8CORE_U3
+v8::Handle<v8::Value> setTimeoutNative(const v8::Arguments& args) {
+#elif defined(V8CORE_U4)
+void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
+#endif
+  base::debug::TraceScope traceScope("weex", "setTimeoutNative");
   JNIEnv* env = getJNIEnv();
   // callbackId
   v8::String::Utf8Value callbackID(args[0]);
-  jstring jCallbackID = (env)->NewStringUTF(*callbackID);
+  jstring jCallbackID = env->NewStringUTF(*callbackID);
 
   // time
   v8::String::Utf8Value time(args[1]);
-  jstring jTime = (env)->NewStringUTF(*time);
+  jstring jTime = env->NewStringUTF(*time);
 
-  jmethodID tempMethodId =
-      (env)->GetMethodID(jBridgeClazz, "setTimeoutNative",
+  if (jSetTimeoutNativeMethodId == NULL) {
+    jSetTimeoutNativeMethodId =
+        env->GetMethodID(jBridgeClazz, "setTimeoutNative",
                          "(Ljava/lang/String;Ljava/lang/String;)V");
-  (env)->CallVoidMethod(jThis, tempMethodId, jCallbackID, jTime);
+  }
+  env->CallVoidMethod(jThis, jSetTimeoutNativeMethodId, jCallbackID, jTime);
   env->DeleteLocalRef(jCallbackID);
   env->DeleteLocalRef(jTime);
+#ifdef V8CORE_U3
+  return v8::Boolean::New(true);
+#elif defined(V8CORE_U4)
   args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+#endif
 }
 
 /**
  * JS log output.
  */
-static void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& args) {
+#ifdef V8CORE_U3
+v8::Handle<v8::Value> nativeLog(const v8::Arguments& args) {
+#elif defined(V8CORE_U4)
+void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
-  char s[1000] = "";
-  int available_len = sizeof(s) - 1;
+#endif
+  JNIEnv* env;
+  bool result = false;
+
+#ifdef V8CORE_U3
+  v8::Handle<v8::String> accumulator = v8::String::Empty();
+#elif defined(V8CORE_U4)
+  v8::Handle<v8::String> accumulator = v8::String::Empty(isolate);
+#endif
   for (int i = 0; i < args.Length(); i++) {
-    v8::String::Utf8Value str(args[i]);
-    int append_len = strlen(*str) + 3;
-    if (append_len < available_len) {
-      strcat(s, *str);
-      strcat(s, " | ");
-      available_len -= append_len;
-    } else {
-      strncat(s, *str, available_len);
-      break;
+    v8::Local<v8::String> str_arg = args[i]->ToString();
+    if (!str_arg.IsEmpty()) {
+      accumulator = v8::String::Concat(accumulator, str_arg);
     }
   }
-  LOGA("jsLog>>>>:%s", s);
-
-  JNIEnv* env = getJNIEnv();
-  jclass clazz = NULL;
-  jstring str_msg = NULL;
-  jstring str_tag = NULL;
-  jmethodID mid_static_method;
-  clazz = (env)->FindClass("com/taobao/weex/utils/WXLogUtils");
-  if (clazz == NULL) {
-    args.GetReturnValue().Set(v8::Boolean::New(isolate, false));
-    return;
+  if (!accumulator.IsEmpty()) {
+    env = getJNIEnv();
+    v8::String::Value arg(accumulator);
+    jstring str_msg = v8String2JString(env, arg);
+    jclass clazz = env->FindClass("com/taobao/weex/utils/WXLogUtils");
+    if (clazz != NULL) {
+      if (jLogMethodId == NULL) {
+        jLogMethodId = env->GetStaticMethodID(
+            clazz, "d", "(Ljava/lang/String;Ljava/lang/String;)V");
+      }
+      if (jLogMethodId != NULL) {
+        jstring str_tag = env->NewStringUTF("jsLog");
+        // str_msg = env->NewStringUTF(s);
+        env->CallStaticVoidMethod(clazz, jLogMethodId, str_tag, str_msg);
+        result = true;
+        env->DeleteLocalRef(str_msg);
+        env->DeleteLocalRef(str_tag);
+      }
+      env->DeleteLocalRef(clazz);
+    }
   }
 
-  mid_static_method = (env)->GetStaticMethodID(
-      clazz, "d", "(Ljava/lang/String;Ljava/lang/String;)V");
-  if (mid_static_method == NULL) {
-    args.GetReturnValue().Set(v8::Boolean::New(isolate, false));
-    return;
-  }
-  str_tag = env->NewStringUTF("jsLog");
-  str_msg = (env)->NewStringUTF(s);
-  (env)->CallStaticVoidMethod(clazz, mid_static_method, str_tag, str_msg);
-
-  (env)->DeleteLocalRef(clazz);
-  env->DeleteLocalRef(str_tag);
-  (env)->DeleteLocalRef(str_msg);
-
-  return args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+#ifdef V8CORE_U3
+  return v8::Boolean::New(result);
+#elif defined(V8CORE_U4)
+  args.GetReturnValue().Set(v8::Boolean::New(isolate, result));
+#endif
 }
+
+/**
+ * V8 would have a chance to guide GC heuristic,
+ * then V8 could clean up the memory.
+ */
+#ifdef V8CORE_U3
+static void notifyTrimMemoryInternally() {
+  base::debug::TraceScope traceScope("weex", "notifyTrimMemoryInternally");
+  bool finished = false;
+  const int maxCount = 5;
+  for (int i = 0; i < maxCount && !finished; i++) {
+    v8::V8::ContextDisposedNotification();
+    finished = v8::V8::IdleNotification(LONG_TERM_IDLE_TIME_IN_MS);
+  }
+}
+
+static v8::Handle<v8::Value> notifyTrimMemory(const v8::Arguments& args) {
+  notifyTrimMemoryInternally();
+  return v8::Undefined();
+}
+#elif defined(V8CORE_U4)
+static void notifyTrimMemoryInternally(v8::Isolate* isolate) {
+  if (!isolate) return;
+
+  base::debug::TraceScope traceScope("weex", "notifyTrimMemoryInternally");
+  bool finished = false;
+  const int maxCount = 5;
+  for (int i = 0; i < maxCount && !finished; i++) {
+    isolate->ContextDisposedNotification();
+    finished = isolate->IdleNotification(LONG_TERM_IDLE_TIME_IN_MS);
+  }
+}
+
+static void notifyTrimMemory(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  notifyTrimMemoryInternally(args.GetIsolate());
+}
+
+static void notifySerializeCodeCache(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  weex::V8ScriptRunner::serializeCache();
+}
+#endif
+
+/**
+ * Markup states.
+ */
+void markupStateInternally() {
+  if (execJSCount + samplingBegin == MAX_EXECJS_COUNT) {
+    execJSCount = MIN_EXECJS_COUNT;
+  }
+  lastExecJSCount = execJSCount;
+  idle_notification_FLAG = true;
+  samplingExecJSCount = 0;
+}
+
+#ifdef V8CORE_U3
+static v8::Handle<v8::Value> markupState(const v8::Arguments& args) {
+  markupStateInternally();
+  return v8::Undefined();
+}
+#elif defined V8CORE_U4
+static void markupState(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  markupStateInternally();
+}
+#endif
 
 /**
  * Creates a new execution environment containing the built-in functions.
  *
  */
-static v8::Local<v8::Context> CreateShellContext() {
+#ifdef V8CORE_U3
+v8::Persistent<v8::Context> CreateShellContext() {
+  // Create a template for the global object.
+  v8::Handle<v8::ObjectTemplate> global = v8::ObjectTemplate::New();
+
+  // Bind the global 'callNative' function to the C++  callNative.
+  global->Set(v8::String::New("callNative"),
+              v8::FunctionTemplate::New(callNative));
+
+  // Bind the global 'callNativeModule' function to the C++  callNativeModule.
+  global->Set(v8::String::New("callNativeModule"),
+              v8::FunctionTemplate::New(callNativeModule));
+
+  // Bind the global 'callNativeComponent' function to the C++
+  // callNativeComponent.
+  global->Set(v8::String::New("callNativeComponent"),
+              v8::FunctionTemplate::New(callNativeComponent));
+
+  // Bind the global 'callAddElement' function to the C++  callNative.
+  global->Set(v8::String::New("callAddElement"),
+              v8::FunctionTemplate::New(callAddElement));
+
+  // Bind the global 'setTimeoutNative' function to the C++ setTimeoutNative.
+  global->Set(v8::String::New("setTimeoutNative"),
+              v8::FunctionTemplate::New(setTimeoutNative));
+
+  // Bind the global 'nativeLog' function to the C++ Print callback.
+  global->Set(v8::String::New("nativeLog"),
+              v8::FunctionTemplate::New(nativeLog));
+
+  // Bind the global 'notifyTrimMemory' function
+  // to the C++ function 'notifyTrimMemory'
+  global->Set(v8::String::New("notifyTrimMemory"),
+              v8::FunctionTemplate::New(notifyTrimMemory));
+
+  // Bind the global 'markupState' function
+  // to the C++ function 'markupState'
+  global->Set(v8::String::New("markupState"),
+              v8::FunctionTemplate::New(markupState));
+
+  // Bind the global 'WXEnvironment' Object.
+  global->Set(v8::String::New("WXEnvironment"), WXEnvironment);
+
+  return v8::Context::New(NULL, global);
+}
+#elif defined(V8CORE_U4)
+v8::Local<v8::Context> CreateShellContext() {
   v8::Isolate* isolate = globalIsolate;
   // Create a template for the global object.
-  v8::Local<v8::ObjectTemplate> global = v8::ObjectTemplate::New(isolate);
+  v8::Handle<v8::ObjectTemplate> global = v8::ObjectTemplate::New();
 
   // Bind the global 'callNative' function to the C++  callNative.
   global->Set(v8::String::NewFromUtf8(isolate, "callNative"),
               v8::FunctionTemplate::New(isolate, callNative));
+
+  // Bind the global 'callNativeModule' function to the C++  callNativeModule.
+  global->Set(v8::String::NewFromUtf8(isolate, "callNativeModule"),
+              v8::FunctionTemplate::New(isolate, callNativeModule));
+
+  // Bind the global 'callNativeComponent' function to the C++
+  // callNativeComponent.
+  global->Set(v8::String::NewFromUtf8(isolate, "callNativeComponent"),
+              v8::FunctionTemplate::New(isolate, callNativeComponent));
+
+  // Bind the global 'callAddElement' function to the C++  callNative.
+  global->Set(v8::String::NewFromUtf8(isolate, "callAddElement"),
+              v8::FunctionTemplate::New(isolate, callAddElement));
 
   // Bind the global 'setTimeoutNative' function to the C++ setTimeoutNative.
   global->Set(v8::String::NewFromUtf8(isolate, "setTimeoutNative"),
@@ -526,10 +1826,166 @@ static v8::Local<v8::Context> CreateShellContext() {
   global->Set(v8::String::NewFromUtf8(isolate, "nativeLog"),
               v8::FunctionTemplate::New(isolate, nativeLog));
 
+  // Bind the global 'notifyTrimMemory' function
+  // to the C++ function 'notifyTrimMemory'
+  global->Set(v8::String::NewFromUtf8(isolate, "notifyTrimMemory"),
+              v8::FunctionTemplate::New(isolate, notifyTrimMemory));
+
+  global->Set(v8::String::NewFromUtf8(isolate, "notifySerializeCodeCache"),
+              v8::FunctionTemplate::New(isolate, notifySerializeCodeCache));
+
+  global->Set(v8::String::NewFromUtf8(isolate, "compileAndRunBundle"),
+              v8::FunctionTemplate::New(isolate, compileAndRunBundle));
+
+  global->Set(v8::String::NewFromUtf8(isolate, "markupState"),
+              v8::FunctionTemplate::New(isolate, markupState));
+
   // Bind the global 'WXEnvironment' Object.
   global->Set(v8::String::NewFromUtf8(isolate, "WXEnvironment"), WXEnvironment);
 
   return v8::Context::New(isolate, NULL, global);
+}
+#endif
+
+static void takeHeapSnapshot(const char* filename) {
+  LOGA("begin takeHeapSnapshot: %s", filename);
+  FILE* fp = fopen(filename, "w");
+  if (NULL == fp) {
+    return;
+  }
+
+  v8::Isolate* isolate = globalIsolate;
+  v8::HandleScope handleScope(isolate);
+#ifdef V8CORE_U3
+  v8::Handle<v8::String> title = v8::String::New(filename);
+  const v8::HeapSnapshot* heapSnap = v8::HeapProfiler::TakeSnapshot(title);
+#elif defined V8CORE_U4
+  v8::Handle<v8::String> title = v8::String::NewFromUtf8(isolate, filename);
+  v8::HeapProfiler* profiler = isolate->GetHeapProfiler();
+  const v8::HeapSnapshot* heapSnap = profiler->TakeHeapSnapshot(title);
+#endif
+  AsciiOutputStream stream(fp);
+  heapSnap->Serialize(&stream, v8::HeapSnapshot::kJSON);
+
+  fclose(fp);
+  const_cast<v8::HeapSnapshot*>(heapSnap)->Delete();
+  LOGA("end takeHeapSnapshot");
+}
+
+/**
+ * Make a decision whether to tell v8 idle notifications
+ *
+ * It's not a good idea to notify a v8 idle notification
+ * every time of calling execJS(), because too many times
+ * of notifications have a little performance impact.
+ *
+ * If there are too many times of calling execJS, don't
+ * tell v8 idle notifications. We add simple strategies
+ * to check if there are too many times of calling execJS
+ * within the period of rendering the current bundle:
+ *   a) don't trigger notifications if execJSCount is less
+ *      than 100, because jsfm initialization wound take
+ *      almost 100 times of calling execJS().
+ *   b) We begin to record the times of calling execJS,
+ *      if the times are greater than upper limit of 10,
+ *      we decide not to tell v8 idle notifications.
+ */
+bool needIdleNotification() {
+  if (!idle_notification_FLAG) {
+    return false;
+  }
+
+  if (execJSCount == MAX_EXECJS_COUNT) execJSCount = MIN_EXECJS_COUNT;
+
+  if (execJSCount++ < MIN_EXECJS_COUNT) {
+    return false;
+  }
+
+  if (execJSCount == MIN_EXECJS_COUNT) {
+    lastExecJSCount = execJSCount;
+  }
+
+  if (execJSCount == lastExecJSCount + samplingBegin) {
+    samplingExecJSCount = 0;
+  } else if (execJSCount > lastExecJSCount + samplingBegin) {
+    if (samplingExecJSCount == MAX_EXECJS_COUNT) {
+      samplingExecJSCount = 0;
+    }
+    if (++samplingExecJSCount >= samplingExecJSCountMax) {
+      idle_notification_FLAG = false;
+    }
+
+    // Also just notify every three times of calling execJS in sampling.
+    if (samplingExecJSCount % denomValue == 0) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  // Just notify idle notifications every three times
+  // of calling execJS.
+  if (execJSCount % denomValue == 0) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+void makeIdleNotification(v8::Isolate* isolate) {
+  if (!needIdleNotification()) {
+    return;
+  }
+
+#ifdef V8CORE_U3
+  (void)(isolate);
+  v8::V8::IdleNotification(SHORT_TERM_IDLE_TIME_IN_MS);
+#elif defined V8CORE_U4
+  isolate->IdleNotification(LONG_TERM_IDLE_TIME_IN_MS);
+#endif
+}
+
+// It's not necessary to make idle notifications every time
+// of invoking init_framework.
+void resetIdleNotificationCount() {
+  execJSCount = 0;
+  idle_notification_FLAG = true;
+}
+
+////////////////////////////////////////////
+static const char* gBridgeClassPathName = "com/taobao/weex/bridge/WXBridge";
+static JNINativeMethod gMethods[] = {
+    {"initFramework", "(Ljava/lang/String;Lcom/taobao/weex/bridge/WXParams;)I",
+     (void*)native_initFramework},
+    {"execJS",
+     "(Ljava/lang/String;Ljava/lang/String;"
+     "Ljava/lang/String;[Lcom/taobao/weex/bridge/WXJSObject;)I",
+     (void*)native_execJS},
+    {"takeHeapSnapshot", "(Ljava/lang/String;)V",
+     (void*)native_takeHeapSnapshot},
+    {"execJSService", "(Ljava/lang/String;)I", (void*)native_execJSService}};
+
+static int registerNativeMethods(JNIEnv* env, const char* className,
+                                 JNINativeMethod* methods, int numMethods) {
+  jclass clazz = (env)->FindClass("com/taobao/weex/bridge/WXBridge");
+  if (clazz == NULL) {
+    LOGE("registerNativeMethods failed to find class '%s'", className);
+    return JNI_FALSE;
+  }
+  if ((env)->RegisterNatives(clazz, methods, numMethods) < 0) {
+    LOGE(
+        "registerNativeMethods failed to register native methods for class "
+        "'%s'",
+        className);
+    return JNI_FALSE;
+  }
+
+  return JNI_TRUE;
+}
+
+static int registerNatives(JNIEnv* env) {
+  return registerNativeMethods(env, gBridgeClassPathName, gMethods,
+                               sizeof(gMethods) / sizeof(gMethods[0]));
 }
 
 /**
@@ -546,24 +2002,31 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
   }
 
   sVm = vm;
-  jclass tempClass = (env)->FindClass("com/taobao/weex/bridge/WXBridge");
-  jBridgeClazz = (jclass)(env)->NewGlobalRef(tempClass);
+  jclass tempClass = env->FindClass("com/taobao/weex/bridge/WXBridge");
+  jBridgeClazz = (jclass)env->NewGlobalRef(tempClass);
   env->DeleteLocalRef(tempClass);
+
+  if (registerNatives(env) != JNI_TRUE) {
+    return JNI_FALSE;
+  }
+
   LOGD("end JNI_OnLoad");
   return JNI_VERSION_1_4;
 }
 
 void JNI_OnUnload(JavaVM* vm, void* reserved) {
   LOGD("beigin JNI_OnUnload");
-  V8context.Reset();
-  if (globalIsolate)
-    globalIsolate->Dispose();
+#ifdef V8CORE_U3
+  V8context.Dispose(globalIsolate);
   v8::V8::Dispose();
+#elif defined(V8CORE_U4)
+  V8context.Reset();
+  if (globalIsolate) {
+    globalIsolate->Dispose();
+  }
   v8::V8::ShutdownPlatform();
-  if (g_platform)
-    delete g_platform;
-  if (g_array_buffer_allocator)
-    delete g_array_buffer_allocator;
+  v8::V8::Dispose();
+#endif
   JNIEnv* env;
   /* Get environment */
   if ((vm)->GetEnv((void**)&env, JNI_VERSION_1_4) != JNI_OK) {
@@ -571,5 +2034,8 @@ void JNI_OnUnload(JavaVM* vm, void* reserved) {
   }
   env->DeleteGlobalRef(jBridgeClazz);
   env->DeleteGlobalRef(jThis);
+
+  using base::debug::TraceEvent;
+  TraceEvent::StopATrace(env);
   LOGD(" end JNI_OnUnload");
 }
