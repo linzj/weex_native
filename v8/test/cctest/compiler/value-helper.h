@@ -82,8 +82,9 @@ class ValueHelper {
         -4.66622e+11f,
         -2.22581e+11f,
         -1.45381e+10f,
-        -2147483649.0f,  // INT32_MIN - 1
+        -2147483904.0f,  // First float32 after INT32_MIN
         -2147483648.0f,  // INT32_MIN
+        -2147483520.0f,  // Last float32 before INT32_MIN
         -1.3956e+09f,
         -1.32951e+09f,
         -1.30721e+09f,
@@ -158,8 +159,8 @@ class ValueHelper {
         1.51116e+11f,
         4.18193e+13f,
         3.59167e+16f,
-        9223372036854775807.0f,   // INT64_MAX
-        18446744073709551615.0f,  // UINT64_MAX
+        9223372036854775808.0f,   // INT64_MAX + 1
+        18446744073709551616.0f,  // UINT64_MAX + 1
         3.38211e+19f,
         2.67488e+20f,
         1.78831e+21f,
@@ -224,9 +225,9 @@ class ValueHelper {
                                     2147483648.0,
                                     2147483648.25,
                                     2147483649.25,
-                                    9223372036854775807.0,  // INT64_MAX
+                                    9223372036854775808.0,  // INT64_MAX + 1
                                     9223373136366403584.0,
-                                    18446744073709551615.0,  // UINT64_MAX
+                                    18446744073709551616.0,  // UINT64_MAX + 1
                                     2e66,
                                     V8_INFINITY,
                                     -V8_INFINITY,
@@ -299,6 +300,18 @@ class ValueHelper {
     return std::vector<double>(&values[0], &values[arraysize(values)]);
   }
 
+  static const std::vector<int16_t> int16_vector() {
+    static const int16_t kValues[] = {
+        0, 1, 2, INT16_MAX - 1, INT16_MAX, INT16_MIN, INT16_MIN + 1, -2, -1};
+    return std::vector<int16_t>(&kValues[0], &kValues[arraysize(kValues)]);
+  }
+
+  static const std::vector<int8_t> int8_vector() {
+    static const int8_t kValues[] = {
+        0, 1, 2, INT8_MAX - 1, INT8_MAX, INT8_MIN, INT8_MIN + 1, -2, -1};
+    return std::vector<int8_t>(&kValues[0], &kValues[arraysize(kValues)]);
+  }
+
   static const std::vector<uint32_t> ror_vector() {
     static const uint32_t kValues[31] = {
         1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
@@ -316,6 +329,8 @@ class ValueHelper {
 
 #define FOR_INT32_INPUTS(var) FOR_INPUTS(int32_t, int32, var)
 #define FOR_UINT32_INPUTS(var) FOR_INPUTS(uint32_t, uint32, var)
+#define FOR_INT16_INPUTS(var) FOR_INPUTS(int16_t, int16, var)
+#define FOR_INT8_INPUTS(var) FOR_INPUTS(int8_t, int8, var)
 #define FOR_INT64_INPUTS(var) FOR_INPUTS(int64_t, int64, var)
 #define FOR_UINT64_INPUTS(var) FOR_INPUTS(uint64_t, uint64, var)
 #define FOR_FLOAT32_INPUTS(var) FOR_INPUTS(float, float32, var)
@@ -331,6 +346,7 @@ static inline void CheckFloatEq(volatile float x, volatile float y) {
     CHECK(std::isnan(y));
   } else {
     CHECK_EQ(x, y);
+    CHECK_EQ(std::signbit(x), std::signbit(y));
   }
 }
 
@@ -345,6 +361,7 @@ static inline void CheckDoubleEq(volatile double x, volatile double y) {
     CHECK(std::isnan(y));
   } else {
     CHECK_EQ(x, y);
+    CHECK_EQ(std::signbit(x), std::signbit(y));
   }
 }
 

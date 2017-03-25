@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# Copyright 2016 the V8 project authors. All rights reserved.
 # Copyright 2015 The Chromium Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -105,13 +106,6 @@ class FakeFile(object):
 
 TEST_CONFIG = """\
 {
-  'configs': {
-    'gyp_rel_bot': ['gyp', 'rel', 'goma'],
-    'gn_debug_goma': ['gn', 'debug', 'goma'],
-    'gyp_debug': ['gyp', 'debug', 'fake_feature1'],
-    'gn_rel_bot': ['gn', 'rel', 'goma'],
-    'gyp_crosscompile': ['gyp', 'crosscompile'],
-  },
   'masters': {
     'chromium': {},
     'fake_master': {
@@ -121,7 +115,17 @@ TEST_CONFIG = """\
       'fake_gn_debug_builder': 'gn_debug_goma',
       'fake_gyp_builder': 'gyp_debug',
       'fake_gn_args_bot': '//build/args/bots/fake_master/fake_gn_args_bot.gn',
+      'fake_multi_phase': ['gn_phase_1', 'gn_phase_2'],
     },
+  },
+  'configs': {
+    'gyp_rel_bot': ['gyp', 'rel', 'goma'],
+    'gn_debug_goma': ['gn', 'debug', 'goma'],
+    'gyp_debug': ['gyp', 'debug', 'fake_feature1'],
+    'gn_rel_bot': ['gn', 'rel', 'goma'],
+    'gyp_crosscompile': ['gyp', 'crosscompile'],
+    'gn_phase_1': ['gn', 'phase_1'],
+    'gn_phase_2': ['gn', 'phase_2'],
   },
   'mixins': {
     'crosscompile': {
@@ -136,6 +140,14 @@ TEST_CONFIG = """\
     'goma': {
       'gn_args': 'use_goma=true',
       'gyp_defines': 'goma=1',
+    },
+    'phase_1': {
+      'gn_args': 'phase=1',
+      'gyp_args': 'phase=1',
+    },
+    'phase_2': {
+      'gn_args': 'phase=2',
+      'gyp_args': 'phase=2',
     },
     'rel': {
       'gn_args': 'is_debug=false',
@@ -488,6 +500,53 @@ class UnitTest(unittest.TestCase):
       self.assertRaises(SystemExit, self.check, ['help', 'gen'])
     finally:
       sys.stdout = orig_stdout
+
+  def test_multiple_phases(self):
+    # Check that not passing a --phase to a multi-phase builder fails.
+    mbw = self.check(['lookup', '-m', 'fake_master', '-b', 'fake_multi_phase'],
+                     ret=1)
+    self.assertIn('Must specify a build --phase', mbw.out)
+
+    # Check that passing a --phase to a single-phase builder fails.
+    mbw = self.check(['lookup', '-m', 'fake_master', '-b', 'fake_gn_builder',
+                      '--phase', '1'],
+                     ret=1)
+    self.assertIn('Must not specify a build --phase', mbw.out)
+
+    # Check different ranges; 0 and 3 are out of bounds, 1 and 2 should work.
+    mbw = self.check(['lookup', '-m', 'fake_master', '-b', 'fake_multi_phase',
+                      '--phase', '0'], ret=1)
+    self.assertIn('Phase 0 out of bounds', mbw.out)
+
+    mbw = self.check(['lookup', '-m', 'fake_master', '-b', 'fake_multi_phase',
+                      '--phase', '1'], ret=0)
+    self.assertIn('phase = 1', mbw.out)
+
+    mbw = self.check(['lookup', '-m', 'fake_master', '-b', 'fake_multi_phase',
+                      '--phase', '2'], ret=0)
+    self.assertIn('phase = 2', mbw.out)
+
+    mbw = self.check(['lookup', '-m', 'fake_master', '-b', 'fake_multi_phase',
+                      '--phase', '3'], ret=1)
+    self.assertIn('Phase 3 out of bounds', mbw.out)
+
+  def test_validate(self):
+    mbw = self.fake_mbw()
+    self.check(['validate'], mbw=mbw, ret=0)
+
+  def test_gyp_env_hacks(self):
+    mbw = self.fake_mbw()
+    mbw.files[mbw.default_config] = GYP_HACKS_CONFIG
+    self.check(['lookup', '-c', 'fake_config'], mbw=mbw,
+               ret=0,
+               out=("GYP_DEFINES='foo=bar baz=1'\n"
+                    "GYP_LINK_CONCURRENCY=1\n"
+                    "LLVM_FORCE_HEAD_REVISION=1\n"
+                    "python build/gyp_chromium -G output_dir=_path_\n"))
+
+
+if __name__ == '__main__':
+  unittest.main()
 
   def test_validate(self):
     mbw = self.fake_mbw()

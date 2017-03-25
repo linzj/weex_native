@@ -1,6 +1,6 @@
-# Copyright 2012 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2012 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 import datetime
 import getpass
@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(os.path.abspath(
+    __file__.decode(sys.getfilesystemencoding())))
 sys.path.append(os.path.join(ROOT_DIR, '..', 'third_party'))
 
 import colorama
@@ -35,7 +36,7 @@ def parse_args(use_isolate_server, use_swarming):
     parser.add_option(
         '-I', '--isolate-server',
         metavar='URL', default=os.environ.get('ISOLATE_SERVER', ''),
-        help='Isolate server to use')
+        help='Isolate server to use (default: ISOLATE_SERVER env var)')
   if use_swarming:
     task_name = '%s-%s-hello_world' % (
       getpass.getuser(),
@@ -46,7 +47,7 @@ def parse_args(use_isolate_server, use_swarming):
     parser.add_option(
         '-S', '--swarming',
         metavar='URL', default=os.environ.get('SWARMING_SERVER', ''),
-        help='Swarming server to use')
+        help='Swarming server to use (default: SWARMING_SERVER env var)')
     parser.add_option(
         '-o', '--os', default=sys.platform,
         help='Swarming slave OS to request. Should be one of the valid '
@@ -55,6 +56,12 @@ def parse_args(use_isolate_server, use_swarming):
     parser.add_option(
         '-t', '--task-name', default=task_name,
         help='Swarming task name, default is based on time: %default')
+    parser.add_option(
+        '--service-account',
+        help='Name of a service account to run the task as. Only literal "bot" '
+             'string can be specified currently (to run the task under bot\'s '
+             'account). Don\'t use task service accounts if not given '
+             '(default).')
   parser.add_option('-v', '--verbose', action='count', default=0)
   parser.add_option(
       '--priority', metavar='INT', type='int', help='Priority to use')

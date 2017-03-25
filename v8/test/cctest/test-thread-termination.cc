@@ -25,6 +25,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "src/api.h"
+#include "src/isolate.h"
+#include "src/objects-inl.h"
 #include "src/v8.h"
 #include "test/cctest/cctest.h"
 
@@ -517,8 +520,7 @@ TEST(ErrorObjectAfterTermination) {
   v8::Context::Scope context_scope(context);
   isolate->TerminateExecution();
   v8::Local<v8::Value> error = v8::Exception::Error(v8_str("error"));
-  // TODO(yangguo): crbug/403509. Check for empty handle instead.
-  CHECK(error->IsUndefined());
+  CHECK(error->IsNativeError());
 }
 
 
@@ -528,9 +530,11 @@ void InnerTryCallTerminate(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Local<v8::Function> loop = v8::Local<v8::Function>::Cast(
       global->Get(CcTest::isolate()->GetCurrentContext(), v8_str("loop"))
           .ToLocalChecked());
+  i::MaybeHandle<i::Object> exception;
   i::MaybeHandle<i::Object> result =
       i::Execution::TryCall(CcTest::i_isolate(), v8::Utils::OpenHandle((*loop)),
-                            v8::Utils::OpenHandle((*global)), 0, NULL, NULL);
+                            v8::Utils::OpenHandle((*global)), 0, nullptr,
+                            i::Execution::MessageHandling::kReport, &exception);
   CHECK(result.is_null());
   // TryCall ignores terminate execution, but rerequests the interrupt.
   CHECK(!args.GetIsolate()->IsExecutionTerminating());

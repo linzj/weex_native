@@ -151,7 +151,8 @@ typedef SimRegisterBase SimFPRegister;    // v0-v31
 
 class Simulator : public DecoderVisitor {
  public:
-  static void FlushICache(base::HashMap* i_cache, void* start, size_t size) {
+  static void FlushICache(base::CustomMatcherHashMap* i_cache, void* start,
+                          size_t size) {
     USE(i_cache);
     USE(start);
     USE(size);
@@ -167,7 +168,7 @@ class Simulator : public DecoderVisitor {
 
   static void Initialize(Isolate* isolate);
 
-  static void TearDown(base::HashMap* i_cache, Redirection* first);
+  static void TearDown(base::CustomMatcherHashMap* i_cache, Redirection* first);
 
   static Simulator* current(v8::internal::Isolate* isolate);
 
@@ -652,11 +653,8 @@ class Simulator : public DecoderVisitor {
 
   template<typename T>
   void AddSubHelper(Instruction* instr, T op2);
-  template<typename T>
-  T AddWithCarry(bool set_flags,
-                 T src1,
-                 T src2,
-                 T carry_in = 0);
+  template <typename T>
+  T AddWithCarry(bool set_flags, T left, T right, int carry_in = 0);
   template<typename T>
   void AddSubWithCarry(Instruction* instr);
   template<typename T>
@@ -866,6 +864,97 @@ class Simulator : public DecoderVisitor {
   }
   char* last_debugger_input() { return last_debugger_input_; }
   char* last_debugger_input_;
+
+  // Synchronization primitives. See ARM DDI 0487A.a, B2.10. Pair types not
+  // implemented.
+  enum class MonitorAccess {
+    Open,
+    Exclusive,
+  };
+
+  enum class TransactionSize {
+    None = 0,
+    Byte = 1,
+    HalfWord = 2,
+    Word = 4,
+  };
+
+  TransactionSize get_transaction_size(unsigned size);
+
+  // The least-significant bits of the address are ignored. The number of bits
+  // is implementation-defined, between 3 and 11. See ARM DDI 0487A.a, B2.10.3.
+  static const uintptr_t kExclusiveTaggedAddrMask = ~((1 << 11) - 1);
+
+  class LocalMonitor {
+   public:
+    LocalMonitor();
+
+    // These functions manage the state machine for the local monitor, but do
+    // not actually perform loads and stores. NotifyStoreExcl only returns
+    // true if the exclusive store is allowed; the global monitor will still
+    // have to be checked to see whether the memory should be updated.
+    void NotifyLoad(uintptr_t addr);
+    void NotifyLoadExcl(uintptr_t addr, TransactionSize size);
+    void NotifyStore(uintptr_t addr);
+    bool NotifyStoreExcl(uintptr_t addr, TransactionSize size);
+
+   private:
+    void Clear();
+
+    MonitorAccess access_state_;
+    uintptr_t tagged_addr_;
+    TransactionSize size_;
+  };
+
+  class GlobalMonitor {
+   public:
+    GlobalMonitor();
+
+    class Processor {
+     public:
+      Processor();
+
+     private:
+      friend class GlobalMonitor;
+      // These functions manage the state machine for the global monitor, but do
+      // not actually perform loads and stores.
+      void Clear_Locked();
+      void NotifyLoadExcl_Locked(uintptr_t addr);
+      void NotifyStore_Locked(uintptr_t addr, bool is_requesting_processor);
+      bool NotifyStoreExcl_Locked(uintptr_t addr, bool is_requesting_processor);
+
+      MonitorAccess access_state_;
+      uintptr_t tagged_addr_;
+      Processor* next_;
+      Processor* prev_;
+      // A stxr can fail due to background cache evictions. Rather than
+      // simulating this, we'll just occasionally introduce cases where an
+      // exclusive store fails. This will happen once after every
+      // kMaxFailureCounter exclusive stores.
+      static const int kMaxFailureCounter = 5;
+      int failure_counter_;
+    };
+
+    // Exposed so it can be accessed by Simulator::{Read,Write}Ex*.
+    base::Mutex mutex;
+
+    void NotifyLoadExcl_Locked(uintptr_t addr, Processor* processor);
+    void NotifyStore_Locked(uintptr_t addr, Processor* processor);
+    bool NotifyStoreExcl_Locked(uintptr_t addr, Processor* processor);
+
+    // Called when the simulator is destroyed.
+    void RemoveProcessor(Processor* processor);
+
+   private:
+    bool IsProcessorInLinkedList_Locked(Processor* processor) const;
+    void PrependProcessor_Locked(Processor* processor);
+
+    Processor* head_;
+  };
+
+  LocalMonitor local_monitor_;
+  GlobalMonitor::Processor global_monitor_processor_;
+  static base::LazyInstance<GlobalMonitor>::type global_monitor_;
 
  private:
   void Init(FILE* stream);

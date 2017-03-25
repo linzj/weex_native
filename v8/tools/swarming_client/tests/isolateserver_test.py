@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-# Copyright 2013 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2013 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 # pylint: disable=W0212,W0223,W0231,W0613
 
@@ -9,12 +9,13 @@ import base64
 import hashlib
 import json
 import logging
+import io
 import os
 import StringIO
 import sys
+import tarfile
 import tempfile
 import unittest
-import urllib
 import zlib
 
 # net_utils adjusts sys.path.
@@ -23,10 +24,12 @@ import net_utils
 import auth
 import isolated_format
 import isolateserver
+import isolate_storage
 import test_utils
-from depot_tools import auto_stub
 from depot_tools import fix_encoding
 from utils import file_path
+from utils import fs
+from utils import logging_utils
 from utils import threading_utils
 
 import isolateserver_mock
@@ -120,7 +123,7 @@ class FakeItem(isolateserver.Item):
     return zlib.compress(self.data, self.compression_level)
 
 
-class MockedStorageApi(isolateserver.StorageApi):
+class MockedStorageApi(isolate_storage.StorageApi):
   def __init__(
       self, missing_hashes, push_side_effect=None, namespace='default'):
     self.missing_hashes = missing_hashes
@@ -146,6 +149,134 @@ class MockedStorageApi(isolateserver.StorageApi):
       if item.digest in self.missing_hashes:
         missing[item] = self.missing_hashes[item.digest]
     return missing
+
+
+class UtilsTest(TestCase):
+  """Tests for helper methods in isolateserver file."""
+
+  def assertFile(self, path, contents):
+    self.assertTrue(fs.exists(path), 'File %s doesn\'t exist!' % path)
+    self.assertMultiLineEqual(contents, fs.open(path, 'rb').read())
+
+  def test_file_read(self):
+    # TODO(maruel): Write test for file_read generator (or remove it).
+    pass
+
+  def test_file_write(self):
+    # TODO(maruel): Write test for file_write generator (or remove it).
+    pass
+
+  def test_fileobj_path(self):
+    # No path on in-memory objects
+    self.assertIs(None, isolateserver.fileobj_path(io.BytesIO('hello')))
+
+    # Path on opened files
+    thisfile = os.path.abspath(__file__.decode(sys.getfilesystemencoding()))
+    f = fs.open(thisfile)
+    result = isolateserver.fileobj_path(f)
+    self.assertIsInstance(result, unicode)
+    self.assertSequenceEqual(result, thisfile)
+
+    # Path on temporary files
+    tf = tempfile.NamedTemporaryFile()
+    result = isolateserver.fileobj_path(tf)
+    self.assertIsInstance(result, unicode)
+    self.assertSequenceEqual(result, tf.name)
+
+    # No path on files which are no longer on the file system
+    tf = tempfile.NamedTemporaryFile(delete=False)
+    fs.unlink(tf.name.decode(sys.getfilesystemencoding()))
+    self.assertIs(None, isolateserver.fileobj_path(tf))
+
+  def test_fileobj_copy_simple(self):
+    inobj = io.BytesIO('hello')
+    outobj = io.BytesIO()
+
+    isolateserver.fileobj_copy(outobj, inobj)
+    self.assertEqual('hello', outobj.getvalue())
+
+  def test_fileobj_copy_partial(self):
+    inobj = io.BytesIO('adatab')
+    outobj = io.BytesIO()
+    inobj.read(1)
+
+    isolateserver.fileobj_copy(outobj, inobj, size=4)
+    self.assertEqual('data', outobj.getvalue())
+
+  def test_fileobj_copy_partial_file_no_size(self):
+    with self.assertRaises(IOError):
+      inobj = io.BytesIO('hello')
+      outobj = io.BytesIO()
+
+      inobj.read(1)
+      isolateserver.fileobj_copy(outobj, inobj)
+
+  def test_fileobj_copy_size_but_file_short(self):
+    with self.assertRaises(IOError):
+      inobj = io.BytesIO('hello')
+      outobj = io.BytesIO()
+
+      isolateserver.fileobj_copy(outobj, inobj, size=10)
+
+  def test_putfile(self):
+    tmpoutdir = None
+    tmpindir = None
+
+    try:
+      tmpindir = tempfile.mkdtemp(prefix='isolateserver_test')
+      infile = os.path.join(tmpindir, u'in')
+      with fs.open(infile, 'wb') as f:
+        f.write('data')
+
+      tmpoutdir = tempfile.mkdtemp(prefix='isolateserver_test')
+
+      # Copy as fileobj
+      fo = os.path.join(tmpoutdir, u'fo')
+      isolateserver.putfile(io.BytesIO('data'), fo)
+      self.assertEqual(True, fs.exists(fo))
+      self.assertEqual(False, fs.islink(fo))
+      self.assertFile(fo, 'data')
+
+      # Copy with partial fileobj
+      pfo = os.path.join(tmpoutdir, u'pfo')
+      fobj = io.BytesIO('adatab')
+      fobj.read(1)  # Read the 'a'
+      isolateserver.putfile(fobj, pfo, size=4)
+      self.assertEqual(True, fs.exists(pfo))
+      self.assertEqual(False, fs.islink(pfo))
+      self.assertEqual('b', fobj.read())
+      self.assertFile(pfo, 'data')
+
+      # Copy as not readonly
+      cp = os.path.join(tmpoutdir, u'cp')
+      with fs.open(infile, 'rb') as f:
+        isolateserver.putfile(f, cp, file_mode=0755)
+      self.assertEqual(True, fs.exists(cp))
+      self.assertEqual(False, fs.islink(cp))
+      self.assertFile(cp, 'data')
+
+      # Use hardlink
+      hl = os.path.join(tmpoutdir, u'hl')
+      with fs.open(infile, 'rb') as f:
+        isolateserver.putfile(f, hl, use_symlink=False)
+      self.assertEqual(True, fs.exists(hl))
+      self.assertEqual(False, fs.islink(hl))
+      self.assertFile(hl, 'data')
+
+      # Use symlink
+      sl = os.path.join(tmpoutdir, u'sl')
+      with fs.open(infile, 'rb') as f:
+        isolateserver.putfile(f, sl, use_symlink=True)
+      self.assertEqual(True, fs.exists(sl))
+      self.assertEqual(True, fs.islink(sl))
+      self.assertEqual('data', fs.open(sl, 'rb').read())
+      self.assertFile(sl, 'data')
+
+    finally:
+      if tmpindir:
+        file_path.rmtree(tmpindir)
+      if tmpoutdir:
+        file_path.rmtree(tmpoutdir)
 
 
 class StorageTest(TestCase):
@@ -350,7 +481,7 @@ class IsolateServerStorageApiTest(TestCase):
     else:
       response = {'content': base64.b64encode(data[offset:])}
     return (
-      server + '/_ah/api/isolateservice/v1/retrieve',
+      server + '/api/isolateservice/v1/retrieve',
       {
           'data': {
               'digest': item,
@@ -369,7 +500,7 @@ class IsolateServerStorageApiTest(TestCase):
   @staticmethod
   def mock_server_details_request(server):
     return (
-        server + '/_ah/api/isolateservice/v1/server_details',
+        server + '/api/isolateservice/v1/server_details',
         {'data': {}},
         {'server_version': 'such a good version'}
     )
@@ -388,7 +519,7 @@ class IsolateServerStorageApiTest(TestCase):
   @staticmethod
   def mock_contains_request(
       server, namespace, request, response, compression=''):
-    url = server + '/_ah/api/isolateservice/v1/preupload'
+    url = server + '/api/isolateservice/v1/preupload'
     digest_collection = dict(request, namespace={
         'compression': compression,
         'digest_hash': 'sha-1',
@@ -398,7 +529,7 @@ class IsolateServerStorageApiTest(TestCase):
 
   @staticmethod
   def mock_upload_request(server, content, ticket, response=None):
-    url = server + '/_ah/api/isolateservice/v1/store_inline'
+    url = server + '/api/isolateservice/v1/store_inline'
     request = {'content': content, 'upload_ticket': ticket}
     return (url, {'data': request}, response)
 
@@ -406,7 +537,7 @@ class IsolateServerStorageApiTest(TestCase):
     server = 'http://example.com'
     namespace ='default'
     self.expected_requests([self.mock_server_details_request(server)])
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     caps = storage._server_capabilities
     self.assertEqual({'server_version': 'such a good version'}, caps)
 
@@ -417,7 +548,7 @@ class IsolateServerStorageApiTest(TestCase):
     item = isolateserver_mock.hash_content(data)
     self.expected_requests(
         [self.mock_fetch_request(server, namespace, item, data)])
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     fetched = ''.join(storage.fetch(item))
     self.assertEqual(data, fetched)
 
@@ -427,7 +558,7 @@ class IsolateServerStorageApiTest(TestCase):
     item = isolateserver_mock.hash_content('something')
     self.expected_requests(
         [self.mock_fetch_request(server, namespace, item)[:-1] + (None,)])
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     with self.assertRaises(IOError):
       _ = ''.join(storage.fetch(item))
 
@@ -447,7 +578,7 @@ class IsolateServerStorageApiTest(TestCase):
     for _content_range_header in good_content_range_headers:
       self.expected_requests([self.mock_fetch_request(
           server, namespace, item, data, offset=offset)])
-      storage = isolateserver.IsolateServer(server, namespace)
+      storage = isolate_storage.IsolateServer(server, namespace)
       fetched = ''.join(storage.fetch(item, offset))
       self.assertEqual(data[offset:], fetched)
 
@@ -481,7 +612,7 @@ class IsolateServerStorageApiTest(TestCase):
               request_headers={'Range': 'bytes=%d-' % offset},
               response_headers={'Content-Range': content_range_header}),
       ])
-      storage = isolateserver.IsolateServer(server, namespace)
+      storage = isolate_storage.IsolateServer(server, namespace)
       with self.assertRaises(IOError):
         _ = ''.join(storage.fetch(item, offset))
 
@@ -504,7 +635,7 @@ class IsolateServerStorageApiTest(TestCase):
       ),
     ]
     self.expected_requests(requests)
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     missing = storage.contains([item])
     self.assertEqual([item], missing.keys())
     push_state = missing[item]
@@ -530,7 +661,7 @@ class IsolateServerStorageApiTest(TestCase):
       ),
     ]
     self.expected_requests(requests)
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     missing = storage.contains([item])
     self.assertEqual([item], missing.keys())
     push_state = missing[item]
@@ -565,13 +696,13 @@ class IsolateServerStorageApiTest(TestCase):
         None,
       ),
       (
-        server + '/_ah/api/isolateservice/v1/finalize_gs_upload',
+        server + '/api/isolateservice/v1/finalize_gs_upload',
         {'data': {'upload_ticket': 'ticket!'}},
         None,
       ),
     ]
     self.expected_requests(requests)
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     missing = storage.contains([item])
     self.assertEqual([item], missing.keys())
     push_state = missing[item]
@@ -604,12 +735,12 @@ class IsolateServerStorageApiTest(TestCase):
     self._requests = [
       self.mock_contains_request(server, namespace, request, response),
     ]
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     result = storage.contains(files)
     self.assertEqual(set(missing), set(result.keys()))
     for i, (_item, push_state) in enumerate(result.iteritems()):
       self.assertEqual(
-          push_state.upload_url, '_ah/api/isolateservice/v1/store_inline')
+          push_state.upload_url, 'api/isolateservice/v1/store_inline')
       self.assertEqual(push_state.finalize_url, None)
 
   def test_contains_network_failure(self):
@@ -617,7 +748,7 @@ class IsolateServerStorageApiTest(TestCase):
     namespace = 'default'
     self.expected_requests([self.mock_contains_request(
         server, namespace, {'items': []}, None)])
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     with self.assertRaises(isolated_format.MappingError):
       storage.contains([])
 
@@ -626,7 +757,7 @@ class IsolateServerStorageApiTest(TestCase):
     namespace = 'default'
     self.expected_requests([self.mock_contains_request(
         server, namespace, {'items': []}, None)])
-    storage = isolateserver.IsolateServer(server, namespace)
+    storage = isolate_storage.IsolateServer(server, namespace)
     with self.assertRaises(isolated_format.MappingError):
       storage.contains([])
 
@@ -720,9 +851,12 @@ class IsolateServerStorageSmokeTest(unittest.TestCase):
       pending.discard(fetched)
 
     # Ensure fetched same data as was pushed.
-    self.assertEqual(
-        [i.buffer for i in items],
-        [cache.read(i.digest) for i in items])
+    actual = []
+    for i in items:
+      with cache.getfileobj(i.digest) as f:
+        actual.append(f.read())
+
+    self.assertEqual([i.buffer for i in items], actual)
 
   def test_push_and_fetch(self):
     self.run_push_and_fetch_test('default')
@@ -788,6 +922,8 @@ class IsolateServerDownloadTest(TestCase):
   def setUp(self):
     super(IsolateServerDownloadTest, self).setUp()
     self._flagged_requests = []
+    self.mock(logging_utils, 'prepare_logging', lambda *_: None)
+    self.mock(logging_utils, 'set_console_level', lambda *_: None)
 
   def tearDown(self):
     if all(self._flagged_requests):
@@ -803,7 +939,7 @@ class IsolateServerDownloadTest(TestCase):
     server = 'http://example.com'
     requests = [
       (
-        server + '/_ah/api/isolateservice/v1/retrieve',
+        server + '/api/isolateservice/v1/retrieve',
         {
             'data': {
                 'digest': h.encode('utf-8'),
@@ -834,18 +970,19 @@ class IsolateServerDownloadTest(TestCase):
     }
     self.assertEqual(expected, actual)
 
-  def test_download_isolated(self):
+  def test_download_isolated_simple(self):
     # Test downloading an isolated tree.
     actual = {}
-    def file_write_mock(key, generator):
-      actual[key] = ''.join(generator)
-    self.mock(isolateserver, 'file_write', file_write_mock)
+    def putfile_mock(
+        srcfileobj, dstpath, file_mode=None, size=-1, use_symlink=False):
+      actual[dstpath] = srcfileobj.read()
+    self.mock(isolateserver, 'putfile', putfile_mock)
     self.mock(os, 'makedirs', lambda _: None)
     server = 'http://example.com'
     files = {
       os.path.join('a', 'foo'): 'Content',
       'b': 'More content',
-      }
+    }
     isolated = {
       'command': ['Absurb', 'command'],
       'relative_cwd': 'a',
@@ -860,7 +997,198 @@ class IsolateServerDownloadTest(TestCase):
     requests.append((isolated_hash, isolated_data))
     requests = [
       (
-        server + '/_ah/api/isolateservice/v1/retrieve',
+        server + '/api/isolateservice/v1/retrieve',
+        {
+            'data': {
+                'digest': h.encode('utf-8'),
+                'namespace': {
+                    'namespace': 'default-gzip',
+                    'digest_hash': 'sha-1',
+                    'compression': 'flate',
+                },
+                'offset': 0,
+            },
+            'read_timeout': 60,
+        },
+        {'content': base64.b64encode(zlib.compress(v))},
+      ) for h, v in requests
+    ]
+    cmd = [
+      'download',
+      '--isolate-server', server,
+      '--target', self.tempdir,
+      '--isolated', isolated_hash,
+    ]
+    self.expected_requests(requests)
+    self.assertEqual(0, isolateserver.main(cmd))
+    expected = dict(
+        (os.path.join(self.tempdir, k), v) for k, v in files.iteritems())
+    self.assertEqual(expected, actual)
+    expected_stdout = (
+        'To run this test please run from the directory %s:\n  Absurb command\n'
+        % os.path.join(self.tempdir, 'a'))
+    self.checkOutput(expected_stdout, '')
+
+  def test_download_isolated_ar_archive(self):
+    # Test downloading an isolated tree.
+    actual = {}
+    def putfile_mock(
+        srcfileobj, dstpath, file_mode=None, size=-1, use_symlink=False):
+      actual[dstpath] = srcfileobj.read(size)
+    self.mock(isolateserver, 'putfile', putfile_mock)
+    self.mock(os, 'makedirs', lambda _: None)
+    server = 'http://example.com'
+
+    files = {
+      os.path.join('a', 'foo'): 'Content',
+      'b': 'More content',
+      'c': 'Even more content!',
+    }
+
+    archive = (
+      # ar file header
+      '!<arch>\n'
+      # File 1 -------------------------
+      # (16 bytes) filename len
+      '#1/5            '
+      # file metadata
+      '1447140471  1000  1000  100640  '
+      # (10 bytes) Data size
+      '12        '
+      # (2 bytes) File magic
+      '\x60\n'
+      # (5 bytes) File name
+      'a/foo'
+      # (7 bytes) File data
+      'Content'
+      # File 2 -------------------------
+      # (16 bytes) filename
+      'b               '
+      # file metadata
+      '1447140471  1000  1000  100640  '
+      # (12 bytes) Data size
+      '12        '
+      # (2 bytes) File magic
+      '\x60\n'
+      # (12 bytes) File data
+      'More content'
+      '')
+
+    isolated = {
+      'command': ['Absurb', 'command'],
+      'relative_cwd': 'a',
+      'files': {
+        'archive1': {
+          'h': isolateserver_mock.hash_content(archive),
+          's': len(archive),
+          't': 'ar',
+        },
+        'c': {
+          'h': isolateserver_mock.hash_content(files['c']),
+          's': len(files['c']),
+        },
+      },
+      'version': isolated_format.ISOLATED_FILE_VERSION,
+    }
+    isolated_data = json.dumps(isolated, sort_keys=True, separators=(',',':'))
+    isolated_hash = isolateserver_mock.hash_content(isolated_data)
+    requests = [
+      (isolated['files']['archive1']['h'], archive),
+      (isolated['files']['c']['h'], files['c']),
+    ]
+    requests.append((isolated_hash, isolated_data))
+    requests = [
+      (
+        server + '/api/isolateservice/v1/retrieve',
+        {
+            'data': {
+                'digest': h.encode('utf-8'),
+                'namespace': {
+                    'namespace': 'default-gzip',
+                    'digest_hash': 'sha-1',
+                    'compression': 'flate',
+                },
+                'offset': 0,
+            },
+            'read_timeout': 60,
+        },
+        {'content': base64.b64encode(zlib.compress(v))},
+      ) for h, v in requests
+    ]
+    cmd = [
+      'download',
+      '--isolate-server', server,
+      '--target', self.tempdir,
+      '--isolated', isolated_hash,
+    ]
+    self.expected_requests(requests)
+    self.assertEqual(0, isolateserver.main(cmd))
+    expected = dict(
+        (os.path.join(self.tempdir, k), v) for k, v in files.iteritems())
+    self.assertEqual(expected, actual)
+    expected_stdout = (
+        'To run this test please run from the directory %s:\n  Absurb command\n'
+        % os.path.join(self.tempdir, 'a'))
+    self.checkOutput(expected_stdout, '')
+
+  def test_download_isolated_tar_archive(self):
+    # Test downloading an isolated tree.
+    actual = {}
+    def putfile_mock(
+        srcfileobj, dstpath, file_mode=None, size=-1, use_symlink=False):
+      actual[dstpath] = srcfileobj.read(size)
+    self.mock(isolateserver, 'putfile', putfile_mock)
+    self.mock(os, 'makedirs', lambda _: None)
+    server = 'http://example.com'
+
+    files = {
+      os.path.join('a', 'foo'): 'Content',
+      'b': 'More content',
+      'c': 'Even more content!',
+    }
+
+    # Generate a tar archive
+    tf = io.BytesIO()
+    with tarfile.TarFile(mode='w', fileobj=tf) as tar:
+      f1 = tarfile.TarInfo()
+      f1.type = tarfile.REGTYPE
+      f1.name = 'a/foo'
+      f1.size = 7
+      tar.addfile(f1, io.BytesIO('Content'))
+
+      f2 = tarfile.TarInfo()
+      f2.type = tarfile.REGTYPE
+      f2.name = 'b'
+      f2.size = 12
+      tar.addfile(f2, io.BytesIO('More content'))
+    archive = tf.getvalue()
+
+    isolated = {
+      'command': ['Absurb', 'command'],
+      'relative_cwd': 'a',
+      'files': {
+        'archive1': {
+          'h': isolateserver_mock.hash_content(archive),
+          's': len(archive),
+          't': 'tar',
+        },
+        'c': {
+          'h': isolateserver_mock.hash_content(files['c']),
+          's': len(files['c']),
+        },
+      },
+      'version': isolated_format.ISOLATED_FILE_VERSION,
+    }
+    isolated_data = json.dumps(isolated, sort_keys=True, separators=(',',':'))
+    isolated_hash = isolateserver_mock.hash_content(isolated_data)
+    requests = [
+      (isolated['files']['archive1']['h'], archive),
+      (isolated['files']['c']['h'], files['c']),
+    ]
+    requests.append((isolated_hash, isolated_data))
+    requests = [
+      (
+        server + '/api/isolateservice/v1/retrieve',
         {
             'data': {
                 'digest': h.encode('utf-8'),
@@ -986,6 +1314,155 @@ class TestArchive(TestCase):
   def test_archive_directory_envvar(self):
     with test_utils.EnvVars({'ISOLATE_SERVER': 'https://localhost:1'}):
       self.help_test_archive(['archive'])
+
+
+class DiskCacheTest(TestCase):
+  def setUp(self):
+    super(DiskCacheTest, self).setUp()
+    # If this fails on Windows, please rerun this tests as an elevated user with
+    # administrator access right.
+    self.assertEqual(True, file_path.enable_symlink())
+
+    self._algo = isolated_format.get_hash_algo('default-gzip')
+    self._free_disk = 1000
+    # Max: 100 bytes, 2 items
+    # Min free disk: 1000 bytes.
+    self._policies = isolateserver.CachePolicies(100, 1000, 2)
+    def get_free_space(p):
+      self.assertEqual(p, self.tempdir)
+      return self._free_disk
+    self.mock(file_path, 'get_free_space', get_free_space)
+    # TODO(maruel): Test the following.
+    #cache.touch()
+
+  def get_cache(self):
+    return isolateserver.DiskCache(self.tempdir, self._policies, self._algo)
+
+  def to_hash(self, content):
+    return self._algo(content).hexdigest(), content
+
+  def test_read_evict(self):
+    self._free_disk = 1100
+    h_a = self.to_hash('a')[0]
+    with self.get_cache() as cache:
+      cache.write(h_a, 'a')
+      with cache.getfileobj(h_a) as f:
+        self.assertEqual('a', f.read())
+
+    with self.get_cache() as cache:
+      cache.evict(h_a)
+      with self.assertRaises(isolateserver.CacheMiss):
+        cache.getfileobj(h_a)
+
+  def test_policies_free_disk(self):
+    with self.assertRaises(isolateserver.Error):
+      self.get_cache().write(*self.to_hash('a'))
+
+  def test_policies_fit(self):
+    self._free_disk = 1100
+    self.get_cache().write(*self.to_hash('a'*100))
+
+  def test_policies_too_much(self):
+    # Cache (size and # items) is not enforced while adding items but free disk
+    # is.
+    self._free_disk = 1004
+    cache = self.get_cache()
+    for i in ('a', 'b', 'c', 'd'):
+      cache.write(*self.to_hash(i))
+    # Mapping more content than the amount of free disk required.
+    with self.assertRaises(isolateserver.Error):
+      cache.write(*self.to_hash('e'))
+
+  def test_cleanup(self):
+    # Inject an item without a state.json. It will be deleted on cleanup.
+    h_a = self.to_hash('a')[0]
+    isolateserver.file_write(os.path.join(self.tempdir, h_a), 'a')
+    cache = self.get_cache()
+    self.assertEqual([], sorted(cache._lru._items.iteritems()))
+    self.assertEqual(
+        sorted([h_a, u'state.json']), sorted(os.listdir(self.tempdir)))
+    cache.cleanup()
+    self.assertEqual([u'state.json'], os.listdir(self.tempdir))
+
+  def test_policies_active_trimming(self):
+    # Start with a larger cache, add many object.
+    # Reload the cache with smaller policies, the cache should be trimmed on
+    # load.
+    h_a = self.to_hash('a')[0]
+    h_b = self.to_hash('b')[0]
+    h_c = self.to_hash('c')[0]
+    h_large, large = self.to_hash('b' * 99)
+
+    def assertItems(expected):
+      actual = [
+        (digest, size) for digest, (size, _) in cache._lru._items.iteritems()]
+      self.assertEqual(expected, actual)
+
+    # Max policies is 100 bytes, 2 items, 1000 bytes free space.
+    self._free_disk = 1101
+    with self.get_cache() as cache:
+      cache.write(h_a, 'a')
+      cache.write(h_large, large)
+      # Cache (size and # items) is not enforced while adding items. The
+      # rationale is that a task may request more data than the size of the
+      # cache policies. As long as there is free space, this is fine.
+      cache.write(h_b, 'b')
+      assertItems([(h_a, 1), (h_large, len(large)), (h_b, 1)])
+      self.assertEqual(h_a, cache._protected)
+      self.assertEqual(1000, cache._free_disk)
+      self.assertEqual(0, cache.initial_number_items)
+      self.assertEqual(0, cache.initial_size)
+      # Free disk is enforced, because otherwise we assume the task wouldn't
+      # be able to start. In this case, it throws an exception since all items
+      # are protected. The item is added since it's detected after the fact.
+      with self.assertRaises(isolateserver.Error):
+        cache.write(h_c, 'c')
+
+    # At this point, after the implicit trim in __exit__(), h_a and h_large were
+    # evicted.
+    self.assertEqual(
+        sorted([h_b, h_c, u'state.json']), sorted(os.listdir(self.tempdir)))
+
+    # Allow 3 items and 101 bytes so h_large is kept.
+    self._policies = isolateserver.CachePolicies(101, 1000, 3)
+    with self.get_cache() as cache:
+      cache.write(h_large, large)
+      self.assertEqual(2, cache.initial_number_items)
+      self.assertEqual(2, cache.initial_size)
+
+    self.assertEqual(
+        sorted([h_b, h_c, h_large, u'state.json']),
+        sorted(os.listdir(self.tempdir)))
+
+    # Assert that trimming is done in constructor too.
+    self._policies = isolateserver.CachePolicies(100, 1000, 2)
+    with self.get_cache() as cache:
+      assertItems([(h_c, 1), (h_large, len(large))])
+      self.assertEqual(None, cache._protected)
+      self.assertEqual(1101, cache._free_disk)
+      self.assertEqual(2, cache.initial_number_items)
+      self.assertEqual(100, cache.initial_size)
+
+  def test_some_file_brutally_deleted(self):
+    h_a = self.to_hash('a')[0]
+
+    self._free_disk = 1100
+    with self.get_cache() as cache:
+      cache.write(h_a, 'a')
+      self.assertTrue(cache.touch(h_a, isolateserver.UNKNOWN_FILE_SIZE))
+      self.assertTrue(cache.touch(h_a, 1))
+
+    os.remove(os.path.join(self.tempdir, h_a))
+
+    with self.get_cache() as cache:
+      # 'Ghost' entry loaded with state.json is still there.
+      self.assertEqual({h_a}, cache.cached_set())
+      # 'touch' detects the file is missing by returning False.
+      self.assertFalse(cache.touch(h_a, isolateserver.UNKNOWN_FILE_SIZE))
+      self.assertFalse(cache.touch(h_a, 1))
+      # Evicting it still works, kills the 'ghost' entry.
+      cache.evict(h_a)
+      self.assertEqual(set(), cache.cached_set())
 
 
 def clear_env_vars():

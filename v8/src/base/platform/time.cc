@@ -56,6 +56,17 @@ int64_t ComputeThreadTicks() {
 V8_INLINE int64_t ClockNow(clockid_t clk_id) {
 #if (defined(_POSIX_MONOTONIC_CLOCK) && _POSIX_MONOTONIC_CLOCK >= 0) || \
   defined(V8_OS_BSD) || defined(V8_OS_ANDROID)
+// On AIX clock_gettime for CLOCK_THREAD_CPUTIME_ID outputs time with
+// resolution of 10ms. thread_cputime API provides the time in ns
+#if defined(V8_OS_AIX)
+  thread_cputime_t tc;
+  if (clk_id == CLOCK_THREAD_CPUTIME_ID) {
+    if (thread_cputime(-1, &tc) != 0) {
+      UNREACHABLE();
+      return 0;
+    }
+  }
+#endif
   struct timespec ts;
   if (clock_gettime(clk_id, &ts) != 0) {
     UNREACHABLE();
@@ -63,7 +74,15 @@ V8_INLINE int64_t ClockNow(clockid_t clk_id) {
   }
   v8::base::internal::CheckedNumeric<int64_t> result(ts.tv_sec);
   result *= v8::base::Time::kMicrosecondsPerSecond;
+#if defined(V8_OS_AIX)
+  if (clk_id == CLOCK_THREAD_CPUTIME_ID) {
+    result += (tc.stime / v8::base::Time::kNanosecondsPerMicrosecond);
+  } else {
+    result += (ts.tv_nsec / v8::base::Time::kNanosecondsPerMicrosecond);
+  }
+#else
   result += (ts.tv_nsec / v8::base::Time::kNanosecondsPerMicrosecond);
+#endif
   return result.ValueOrDie();
 #else  // Monotonic clock not supported.
   return 0;
@@ -620,7 +639,7 @@ bool TimeTicks::IsHighResolutionClockWorking() {
 
 bool ThreadTicks::IsSupported() {
 #if (defined(_POSIX_THREAD_CPUTIME) && (_POSIX_THREAD_CPUTIME >= 0)) || \
-  defined(V8_OS_MACOSX) || defined(V8_OS_ANDROID)
+    defined(V8_OS_MACOSX) || defined(V8_OS_ANDROID) || defined(V8_OS_SOLARIS)
   return true;
 #elif defined(V8_OS_WIN)
   return IsSupportedWin();
@@ -636,6 +655,8 @@ ThreadTicks ThreadTicks::Now() {
 #elif(defined(_POSIX_THREAD_CPUTIME) && (_POSIX_THREAD_CPUTIME >= 0)) || \
   defined(V8_OS_ANDROID)
   return ThreadTicks(ClockNow(CLOCK_THREAD_CPUTIME_ID));
+#elif V8_OS_SOLARIS
+  return ThreadTicks(gethrvtime() / Time::kNanosecondsPerMicrosecond);
 #elif V8_OS_WIN
   return ThreadTicks::GetForThread(::GetCurrentThread());
 #else

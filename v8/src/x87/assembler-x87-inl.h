@@ -41,12 +41,14 @@
 
 #include "src/assembler.h"
 #include "src/debug/debug.h"
+#include "src/objects-inl.h"
 
 namespace v8 {
 namespace internal {
 
 bool CpuFeatures::SupportsCrankshaft() { return true; }
 
+bool CpuFeatures::SupportsSimd128() { return false; }
 
 static const byte kCallOpcode = 0xE8;
 static const int kNoCodeAgeSequenceLength = 5;
@@ -100,21 +102,6 @@ int RelocInfo::target_address_size() {
 }
 
 
-void RelocInfo::set_target_address(Address target,
-                                   WriteBarrierMode write_barrier_mode,
-                                   ICacheFlushMode icache_flush_mode) {
-  Assembler::set_target_address_at(isolate_, pc_, host_, target,
-                                   icache_flush_mode);
-  Assembler::set_target_address_at(isolate_, pc_, host_, target);
-  DCHECK(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_));
-  if (write_barrier_mode == UPDATE_WRITE_BARRIER && host() != NULL &&
-      IsCodeTarget(rmode_)) {
-    Object* target_code = Code::GetCodeFromTargetAddress(target);
-    host()->GetHeap()->incremental_marking()->RecordWriteIntoCode(
-        host(), this, HeapObject::cast(target_code));
-  }
-}
-
 Object* RelocInfo::target_object() {
   DCHECK(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
   return Memory::Object_at(pc_);
@@ -139,6 +126,8 @@ void RelocInfo::set_target_object(Object* target,
       host() != NULL &&
       target->IsHeapObject()) {
     host()->GetHeap()->RecordWriteIntoCode(host(), this, target);
+    host()->GetHeap()->incremental_marking()->RecordWriteIntoCode(
+        host(), this, HeapObject::cast(target));
   }
 }
 
@@ -458,6 +447,17 @@ void Assembler::set_target_address_at(Isolate* isolate, Address pc,
   }
 }
 
+Address Assembler::target_address_at(Address pc, Code* code) {
+  Address constant_pool = code ? code->constant_pool() : NULL;
+  return target_address_at(pc, constant_pool);
+}
+
+void Assembler::set_target_address_at(Isolate* isolate, Address pc, Code* code,
+                                      Address target,
+                                      ICacheFlushMode icache_flush_mode) {
+  Address constant_pool = code ? code->constant_pool() : NULL;
+  set_target_address_at(isolate, pc, constant_pool, target, icache_flush_mode);
+}
 
 Address Assembler::target_address_from_return_address(Address pc) {
   return pc - kCallTargetAddressOffset;

@@ -9,7 +9,7 @@
 #include "src/interpreter/bytecode-generator.h"
 #include "src/interpreter/interpreter.h"
 #include "src/isolate.h"
-#include "src/parsing/parser.h"
+#include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/interpreter/source-position-matcher.h"
 
@@ -58,11 +58,9 @@ struct TestCaseData {
         declaration_parameters_(declaration_parameters),
         arguments_(arguments) {}
 
-  const char* const script() const { return script_; }
-  const char* const declaration_parameters() const {
-    return declaration_parameters_;
-  }
-  const char* const arguments() const { return arguments_; }
+  const char* script() const { return script_; }
+  const char* declaration_parameters() const { return declaration_parameters_; }
+  const char* arguments() const { return arguments_; }
 
  private:
   TestCaseData();
@@ -229,9 +227,6 @@ bool OptimizedBytecodeSourcePositionTester::SourcePositionsMatch(
 
 void TestSourcePositionsEquivalent(int optimization_bitmap) {
   HandleAndZoneScope handles;
-  // Ensure handler table is generated.
-  handles.main_isolate()->interpreter()->Initialize();
-
   OptimizedBytecodeSourcePositionTester tester(handles.main_isolate());
   for (auto test_case_data : kTestCaseData) {
     CHECK(tester.SourcePositionsMatch(

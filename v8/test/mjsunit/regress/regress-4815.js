@@ -16,9 +16,6 @@ function testTraceNativeConversion(nativeFunc) {
   }
 }
 
-testTraceNativeConversion(Math.max);
-testTraceNativeConversion(Math.min);
-
 // C++ builtins.
 testTraceNativeConversion(Math.acos);
 testTraceNativeConversion(Math.asin);
@@ -35,15 +32,6 @@ function testBuiltinInStackTrace(script, expectedString) {
   }
 }
 
-// Use the full name ('String.getDate') in order to avoid false pass
-// results when the method name is mentioned in the error message itself.
-// This occurs, e.g., for Date.prototype.getYear, which uses a different code
-// path and never hits the Generate_DatePrototype_GetField builtin.
-testBuiltinInStackTrace("Date.prototype.getDate.call('')", "at String.getDate");
-testBuiltinInStackTrace("Date.prototype.getUTCDate.call('')",
-                        "at String.getUTCDate");
-testBuiltinInStackTrace("Date.prototype.getTime.call('')", "at String.getTime");
-
 // C++ builtins.
 testBuiltinInStackTrace("Boolean.prototype.toString.call(thrower);",
                         "at Object.toString");
@@ -52,16 +40,12 @@ testBuiltinInStackTrace("Boolean.prototype.toString.call(thrower);",
 testBuiltinInStackTrace("new Date(thrower);", "at new Date");
 
 // Ensure we correctly pick up the receiver's string tag.
-testBuiltinInStackTrace("Math.max(thrower);", "at Math.max");
-testBuiltinInStackTrace("Math.min(thrower);", "at Math.min");
 testBuiltinInStackTrace("Math.acos(thrower);", "at Math.acos");
 testBuiltinInStackTrace("Math.asin(thrower);", "at Math.asin");
 testBuiltinInStackTrace("Math.fround(thrower);", "at Math.fround");
 testBuiltinInStackTrace("Math.imul(thrower);", "at Math.imul");
 
 // As above, but function passed as an argument and then called.
-testBuiltinInStackTrace("((f, x) => f(x))(Math.max, thrower);", "at max");
-testBuiltinInStackTrace("((f, x) => f(x))(Math.min, thrower);", "at min");
 testBuiltinInStackTrace("((f, x) => f(x))(Math.acos, thrower);", "at acos");
 testBuiltinInStackTrace("((f, x) => f(x))(Math.asin, thrower);", "at asin");
 testBuiltinInStackTrace("((f, x) => f(x))(Math.fround, thrower);", "at fround");

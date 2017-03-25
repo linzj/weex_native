@@ -41,13 +41,7 @@
     'coverage%': 0,
     'v8_target_arch%': '<(target_arch)',
     'v8_host_byteorder%': '<!(python -c "import sys; print sys.byteorder")',
-    # Native Client builds currently use the V8 ARM JIT and
-    # arm/simulator-arm.cc to defer the significant effort required
-    # for NaCl JIT support. The nacl_target_arch variable provides
-    # the 'true' target arch for places in this file that need it.
-    # TODO(bradchen): get rid of nacl_target_arch when someday
-    # NaCl V8 builds stop using the ARM simulator
-    'nacl_target_arch%': 'none',     # must be set externally
+    'force_dynamic_crt%': 0,
 
     # Setting 'v8_can_use_vfp32dregs' to 'true' will cause V8 to use the VFP
     # registers d16-d31 in the generated code, both in the snapshot and for the
@@ -63,6 +57,9 @@
     # Similar to the ARM hard float ABI but on MIPS.
     'v8_use_mips_abi_hardfloat%': 'true',
 
+    # Print to stdout on Android.
+    'v8_android_log_stdout%': 0,
+
     # Force disable libstdc++ debug mode.
     'disable_glibcxx_debug%': 0,
 
@@ -77,6 +74,7 @@
     # Chrome needs this definition unconditionally. For standalone V8 builds,
     # it's handled in gypfiles/standalone.gypi.
     'want_separate_host_toolset%': 1,
+    'want_separate_host_toolset_mkpeephole%': 1,
 
     # Toolset the shell binary should be compiled for. Possible values are
     # 'host' and 'target'.
@@ -93,6 +91,7 @@
 
     # Override where to find binutils
     'binutils_dir%': '',
+
     'conditions': [
       ['OS=="linux" and host_arch=="x64"', {
         'binutils_dir%': 'third_party/binutils/Linux_x64/Release/bin',
@@ -107,7 +106,7 @@
       # Do not use 32-bit gold on 32-bit hosts as it runs out address space
       # for component=static_library builds.
       ['((OS=="linux" or OS=="android") and (target_arch=="x64" or target_arch=="arm" or (target_arch=="ia32" and host_arch=="x64"))) or (OS=="linux" and target_arch=="mipsel")', {
-        'linux_use_bundled_gold%': 0,
+        'linux_use_bundled_gold%': 1,
       }, {
         'linux_use_bundled_gold%': 0,
       }],
@@ -316,6 +315,8 @@
             'defines': [
               'V8_TARGET_ARCH_S390_LE_SIM',
             ],
+          }, {
+            'cflags': [ '-march=z196' ],
           }],
           ],
       }],  # s390
@@ -362,28 +363,47 @@
         ],
         'cflags': ['-march=i586'],
       }],  # v8_target_arch=="x87"
-      ['(v8_target_arch=="mips" or v8_target_arch=="mipsel" \
-        or v8_target_arch=="mips64" or v8_target_arch=="mips64el") \
-         and v8_target_arch==target_arch', {
+      ['v8_target_arch=="mips" or v8_target_arch=="mipsel" \
+        or v8_target_arch=="mips64" or v8_target_arch=="mips64el"', {
         'target_conditions': [
           ['_toolset=="target"', {
-            # Target built with a Mips CXX compiler.
-            'variables': {
-              'ldso_path%': '<!(/bin/echo -n $LDSO_PATH)',
-              'ld_r_path%': '<!(/bin/echo -n $LD_R_PATH)',
-            },
             'conditions': [
-              ['ldso_path!=""', {
-                'ldflags': ['-Wl,--dynamic-linker=<(ldso_path)'],
-              }],
-              ['ld_r_path!=""', {
-                'ldflags': ['-Wl,--rpath=<(ld_r_path)'],
-              }],
-              [ 'clang==1', {
-                'cflags': ['-integrated-as'],
+              ['v8_target_arch==target_arch', {
+                # Target built with a Mips CXX compiler.
+                'variables': {
+                  'ldso_path%': '<!(/bin/echo -n $LDSO_PATH)',
+                  'ld_r_path%': '<!(/bin/echo -n $LD_R_PATH)',
+                },
+                'conditions': [
+                  ['ldso_path!=""', {
+                    'ldflags': ['-Wl,--dynamic-linker=<(ldso_path)'],
+                  }],
+                  ['ld_r_path!=""', {
+                    'ldflags': ['-Wl,--rpath=<(ld_r_path)'],
+                  }],
+                  [ 'clang==1', {
+                    'cflags': ['-integrated-as'],
+                  }],
+                  ['OS!="mac"', {
+                    'defines': ['_MIPS_TARGET_HW',],
+                  }, {
+                    'defines': ['_MIPS_TARGET_SIMULATOR',],
+                  }],
+                ],
+              }, {
+                'defines': ['_MIPS_TARGET_SIMULATOR',],
               }],
             ],
-          }],
+          }],  #'_toolset=="target"
+          ['_toolset=="host"', {
+            'conditions': [
+              ['v8_target_arch==target_arch and OS!="mac"', {
+                'defines': ['_MIPS_TARGET_HW',],
+              }, {
+                'defines': ['_MIPS_TARGET_SIMULATOR',],
+              }],
+            ],
+          }],  #'_toolset=="host"
         ],
       }],
       ['v8_target_arch=="mips"', {
@@ -949,7 +969,7 @@
         # gcc -- http://gcc.gnu.org/onlinedocs/gcc-4.8.0/gcc/Optimize-Options.html
         'ldflags': [ '-fuse-ld=gold', ],
       }],
-      ['linux_use_bundled_binutils==0', {
+      ['linux_use_bundled_binutils==1', {
         'cflags': [
           '-B<!(cd <(DEPTH) && pwd -P)/<(binutils_dir)',
         ],
@@ -1027,7 +1047,7 @@
           }],
           ['_toolset=="target"', {
             'conditions': [
-              ['target_cxx_is_biarch==1 and nacl_target_arch!="nacl_x64"', {
+              ['target_cxx_is_biarch==1', {
                 'conditions': [
                   ['host_arch=="s390" or host_arch=="s390x"', {
                     'cflags': [ '-m31' ],
@@ -1066,6 +1086,11 @@
              ]
            }],
          ],
+      }],
+      ['OS=="android" and v8_android_log_stdout==1', {
+        'defines': [
+          'V8_ANDROID_LOG_STDOUT',
+        ],
       }],
       ['OS=="linux" or OS=="freebsd" or OS=="openbsd" or OS=="solaris" \
          or OS=="netbsd" or OS=="qnx" or OS=="aix"', {
@@ -1109,7 +1134,7 @@
           'VCCLCompilerTool': {
             'Optimization': '0',
             'conditions': [
-              ['component=="shared_library"', {
+              ['component=="shared_library" or force_dynamic_crt==1', {
                 'RuntimeLibrary': '3',  # /MDd
               }, {
                 'RuntimeLibrary': '1',  # /MTd
@@ -1161,7 +1186,7 @@
             'StringPooling': 'true',
             'BasicRuntimeChecks': '0',
             'conditions': [
-              ['component=="shared_library"', {
+              ['component=="shared_library" or force_dynamic_crt==1', {
                 'RuntimeLibrary': '3',  #/MDd
               }, {
                 'RuntimeLibrary': '1',  #/MTd
@@ -1190,9 +1215,8 @@
               '-ffunction-sections',
             ],
             'conditions': [
-              # TODO(crbug.com/272548): Avoid -O3 in NaCl
               # Don't use -O3 with sanitizers.
-              ['nacl_target_arch=="none" and asan==0 and msan==0 and lsan==0 \
+              ['asan==0 and msan==0 and lsan==0 \
                 and tsan==0 and ubsan==0 and ubsan_vptr==0', {
                 'cflags': ['-O3'],
                 'cflags!': ['-O2'],
@@ -1309,9 +1333,8 @@
               '<(wno_array_bounds)',
             ],
             'conditions': [
-              # TODO(crbug.com/272548): Avoid -O3 in NaCl
               # Don't use -O3 with sanitizers.
-              ['nacl_target_arch=="none" and asan==0 and msan==0 and lsan==0 \
+              ['asan==0 and msan==0 and lsan==0 \
                 and tsan==0 and ubsan==0 and ubsan_vptr==0', {
                 'cflags': ['-O3'],
                 'cflags!': ['-O2'],
@@ -1352,7 +1375,7 @@
                 'FavorSizeOrSpeed': '0',
                 'StringPooling': 'true',
                 'conditions': [
-                  ['component=="shared_library"', {
+                  ['component=="shared_library" or force_dynamic_crt==1', {
                     'RuntimeLibrary': '2',  #/MD
                   }, {
                     'RuntimeLibrary': '0',  #/MT

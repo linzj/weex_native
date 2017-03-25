@@ -41,14 +41,14 @@
 
 #include "src/assembler.h"
 #include "src/debug/debug.h"
-
+#include "src/objects-inl.h"
 
 namespace v8 {
 namespace internal {
 
+bool CpuFeatures::SupportsCrankshaft() { return true; }
 
-bool CpuFeatures::SupportsCrankshaft() { return IsSupported(VFP3); }
-
+bool CpuFeatures::SupportsSimd128() { return true; }
 
 int DoubleRegister::NumRegisters() {
   return CpuFeatures::IsSupported(VFP32DREGS) ? 32 : 16;
@@ -98,20 +98,6 @@ int RelocInfo::target_address_size() {
   return kPointerSize;
 }
 
-
-void RelocInfo::set_target_address(Address target,
-                                   WriteBarrierMode write_barrier_mode,
-                                   ICacheFlushMode icache_flush_mode) {
-  DCHECK(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_));
-  Assembler::set_target_address_at(isolate_, pc_, host_, target,
-                                   icache_flush_mode);
-  if (write_barrier_mode == UPDATE_WRITE_BARRIER &&
-      host() != NULL && IsCodeTarget(rmode_)) {
-    Object* target_code = Code::GetCodeFromTargetAddress(target);
-    host()->GetHeap()->incremental_marking()->RecordWriteIntoCode(
-        host(), this, HeapObject::cast(target_code));
-  }
-}
 
 Object* RelocInfo::target_object() {
   DCHECK(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
@@ -200,9 +186,6 @@ void RelocInfo::set_target_cell(Cell* cell,
                                                                   cell);
   }
 }
-
-
-static const int kNoCodeAgeSequenceLength = 3 * Assembler::kInstrSize;
 
 
 Handle<Object> RelocInfo::code_age_stub_handle(Assembler* origin) {
@@ -313,6 +296,7 @@ Operand::Operand(int32_t immediate, RelocInfo::Mode rmode)  {
   rmode_ = rmode;
 }
 
+Operand Operand::Zero() { return Operand(static_cast<int32_t>(0)); }
 
 Operand::Operand(const ExternalReference& f)  {
   rm_ = no_reg;
@@ -333,14 +317,6 @@ Operand::Operand(Register rm) {
   rs_ = no_reg;
   shift_op_ = LSL;
   shift_imm_ = 0;
-}
-
-
-bool Operand::is_reg() const {
-  return rm_.is_valid() &&
-         rs_.is(no_reg) &&
-         shift_op_ == LSL &&
-         shift_imm_ == 0;
 }
 
 
@@ -604,6 +580,19 @@ void Assembler::set_target_address_at(Isolate* isolate, Address pc,
   }
 }
 
+Address Assembler::target_address_at(Address pc, Code* code) {
+  Address constant_pool = code ? code->constant_pool() : NULL;
+  return target_address_at(pc, constant_pool);
+}
+
+void Assembler::set_target_address_at(Isolate* isolate, Address pc, Code* code,
+                                      Address target,
+                                      ICacheFlushMode icache_flush_mode) {
+  Address constant_pool = code ? code->constant_pool() : NULL;
+  set_target_address_at(isolate, pc, constant_pool, target, icache_flush_mode);
+}
+
+EnsureSpace::EnsureSpace(Assembler* assembler) { assembler->CheckBuffer(); }
 
 }  // namespace internal
 }  // namespace v8

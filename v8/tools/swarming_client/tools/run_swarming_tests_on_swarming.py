@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-# Copyright 2012 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2012 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 """Runs the whole set of swarming client unit tests on swarming itself.
 
@@ -23,7 +23,8 @@ import sys
 import tempfile
 import time
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(
+    __file__.decode(sys.getfilesystemencoding()))))
 
 # Must be first import.
 import parallel_execution
@@ -70,7 +71,7 @@ def archive_isolated_triggers(isolate_server, tree_isolated, tests):
     for test in tests:
       test_name = os.path.basename(test)
       # Creates a manual .isolated file. See
-      # https://code.google.com/p/swarming/wiki/IsolatedDesign for more details.
+      # https://github.com/luci/luci-py/blob/master/appengine/isolate/doc/Design.md#isolated-file-format
       isolated = {
         'algo': 'sha-1',
         'command': ['python', test],

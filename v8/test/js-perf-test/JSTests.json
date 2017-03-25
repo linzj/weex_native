@@ -1,13 +1,30 @@
 {
   "name": "JSTests",
-  "run_count": 5,
-  "run_count_android_arm": 3,
-  "run_count_android_arm64": 3,
+  "run_count": 3,
+  "run_count_arm": 1,
+  "run_count_arm64": 1,
   "timeout": 120,
   "units": "score",
   "total": true,
   "resources": ["base.js"],
   "tests": [
+    {
+      "name": "AsyncAwait",
+      "path": ["AsyncAwait"],
+      "main": "run.js",
+      "resources": [
+        "native.js",
+        "baseline-babel-es2017.js",
+        "baseline-naive-promises.js"
+      ],
+      "flags": ["--allow-natives-syntax"],
+      "results_regexp": "^%s\\-AsyncAwait\\(Score\\): (.+)$",
+      "tests": [
+        {"name": "BaselineES2017"},
+        {"name": "BaselineNaivePromises"},
+        {"name": "Native"}
+      ]
+    },
     {
       "name": "Generators",
       "path": ["Generators"],
@@ -23,8 +40,7 @@
       "resources": ["generators.js"],
       "flags": [
         "--harmony-function-sent",
-        "--ignition",
-        "--ignition-generators"
+        "--ignition"
       ],
       "results_regexp": "^Generators\\-Generators\\(Score\\): (.+)$"
     },
@@ -36,7 +52,6 @@
       "flags": [
         "--harmony-function-sent",
         "--ignition",
-        "--ignition-generators",
         "--turbo",
         "--turbo-from-bytecode"
       ],
@@ -47,7 +62,6 @@
       "path": ["RestParameters"],
       "main": "run.js",
       "resources": ["rest.js"],
-      "run_count": 5,
       "units": "score",
       "results_regexp": "^%s\\-RestParameters\\(Score\\): (.+)$",
       "tests": [
@@ -59,7 +73,6 @@
       "path": ["SpreadCalls"],
       "main": "run.js",
       "resources": ["spreadcalls.js"],
-      "run_count": 5,
       "units": "score",
       "results_regexp": "^%s\\-SpreadCalls\\(Score\\): (.+)$",
       "tests": [
@@ -77,6 +90,28 @@
       "tests": [
         {"name": "Super"},
         {"name": "DefaultConstructor"}
+      ]
+    },
+    {
+      "name": "Closures",
+      "path": ["Closures"],
+      "main": "run.js",
+      "resources": ["closures.js"],
+      "flags": [],
+      "results_regexp": "^%s\\-Closures\\(Score\\): (.+)$",
+      "tests": [
+        {"name": "Closures"}
+      ]
+    },
+    {
+      "name": "ClosuresMarkForTierUp",
+      "path": ["Closures"],
+      "main": "run.js",
+      "resources": ["closures.js"],
+      "flags": ["--mark_shared_functions_for_tier_up"],
+      "results_regexp": "^%s\\-Closures\\(Score\\): (.+)$",
+      "tests": [
+        {"name": "Closures"}
       ]
     },
     {
@@ -121,8 +156,29 @@
       "main": "run.js",
       "resources": ["harmony-string.js"],
       "results_regexp": "^%s\\-Strings\\(Score\\): (.+)$",
+      "run_count": 1,
+      "timeout": 240,
+      "timeout_arm": 420,
       "tests": [
         {"name": "StringFunctions"}
+      ]
+    },
+    {
+      "name": "StringIterators",
+      "path": ["StringIterators"],
+      "main": "run.js",
+      "resources": ["string-iterator.js"],
+      "results_regexp": "^%s\\-StringIterators\\(Score\\): (.+)$",
+      "tests": [
+        {"name": "Spread_OneByteShort"},
+        {"name": "Spread_TwoByteShort"},
+        {"name": "Spread_WithSurrogatePairsShort"},
+        {"name": "ForOf_OneByteShort"},
+        {"name": "ForOf_TwoByteShort"},
+        {"name": "ForOf_WithSurrogatePairsShort"},
+        {"name": "ForOf_OneByteLong"},
+        {"name": "ForOf_TwoByteLong"},
+        {"name": "ForOf_WithSurrogatePairsLong"}
       ]
     },
     {
@@ -130,7 +186,6 @@
       "path": ["Templates"],
       "main": "run.js",
       "resources": ["templates.js"],
-      "run_count": 5,
       "units": "score",
       "results_regexp": "^%s\\-Templates\\(Score\\): (.+)$",
       "total": true,
@@ -147,12 +202,14 @@
       "flags": ["--harmony"],
       "resources": [
         "assign.js",
-        "values.js",
-        "entries.js"
+        "create.js",
+        "entries.js",
+        "values.js"
       ],
       "results_regexp": "^%s\\-Object\\(Score\\): (.+)$",
       "tests": [
         {"name": "Assign"},
+        {"name": "Create"},
         {"name": "Entries"},
         {"name": "EntriesMegamorphic"},
         {"name": "Values"},
@@ -185,9 +242,6 @@
       "main": "run.js",
       "resources": ["keys.js"],
       "results_regexp": "^%s\\-Keys\\(Score\\): (.+)$",
-      "run_count": 3,
-      "run_count_android_arm": 2,
-      "run_count_android_arm64": 2,
       "tests": [
         {"name": "Object.keys()"},
         {"name": "for-in"},
@@ -219,6 +273,59 @@
         {"name": "Object.hasOwnProperty--el"},
         {"name": "Object.hasOwnProperty--el-str"},
         {"name": "Object.hasOwnProperty--NE-el"}
+      ]
+    },
+    {
+      "name": "TypedArrays",
+      "path": ["TypedArrays"],
+      "results_regexp": "^TypedArrays\\-%s\\(Score\\): (.+)$",
+      "tests": [
+        {
+          "name": "CopyWithin",
+          "main": "run.js",
+          "test_flags": ["copywithin"]
+        },
+        {
+          "name": "Constructor",
+          "main": "run.js",
+          "test_flags": ["constructor"]
+        },
+        {
+          "name": "Constructor--Future",
+          "flags": ["--future"],
+          "results_regexp": "^TypedArrays\\-Constructor\\(Score\\): (.+)$",
+          "main": "run.js",
+          "test_flags": ["constructor"]
+        },
+        {
+          "name": "ConstructWithBuffer",
+          "main": "run.js",
+          "test_flags": ["construct-buffer"]
+        },
+        {
+          "name": "ConstructWithBuffer--Future",
+          "flags": ["--future"],
+          "results_regexp": "^TypedArrays\\-ConstructWithBuffer\\(Score\\): (.+)$",
+          "main": "run.js",
+          "test_flags": ["construct-buffer"]
+        },
+        {
+          "name": "ConstructArrayLike",
+          "main": "run.js",
+          "test_flags": ["construct-arraylike"]
+        },
+        {
+          "name": "ConstructArrayLike--Future",
+          "flags": ["--future"],
+          "results_regexp": "^TypedArrays\\-ConstructArrayLike\\(Score\\): (.+)$",
+          "main": "run.js",
+          "test_flags": ["construct-arraylike"]
+        },
+        {
+          "name": "Sort",
+          "main": "run.js",
+          "test_flags": ["sort"]
+        }
       ]
     }
   ]

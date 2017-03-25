@@ -46,6 +46,7 @@
     'msvs_multi_core_compile%': '1',
     'mac_deployment_target%': '10.7',
     'release_extra_cflags%': '',
+    'v8_enable_inspector%': 0,
     'variables': {
       'variables': {
         'variables': {
@@ -121,10 +122,19 @@
       # also controls coverage granularity (1 for function-level, 2 for
       # block-level, 3 for edge-level).
       'sanitizer_coverage%': 0,
+
+      # Use dynamic libraries instrumented by one of the sanitizers
+      # instead of the standard system libraries. Set this flag to download
+      # prebuilt binaries from GCS.
+      'use_prebuilt_instrumented_libraries%': 0,
+
       # Use libc++ (buildtools/third_party/libc++ and
       # buildtools/third_party/libc++abi) instead of stdlibc++ as standard
       # library. This is intended to be used for instrumented builds.
       'use_custom_libcxx%': 0,
+
+      'clang_dir%': '<(base_dir)/third_party/llvm-build/Release+Asserts',
+      'make_clang_dir%': '<(base_dir)/third_party/llvm-build/Release+Asserts',
 
       'use_lto%': 0,
 
@@ -152,18 +162,13 @@
 
       'conditions': [
         # Set default gomadir.
-          [ 'OS=="android"', {
-              'clang_dir%': '<(android_ndk_root)/toolchains/llvm/prebuilt/linux-x86_64',
-          }, {
-              'clang_dir%': '<(base_dir)/third_party/llvm-build/Release+Asserts',
-          } ],
         ['OS=="win"', {
           'gomadir': 'c:\\goma\\goma-win',
         }, {
           'gomadir': '<!(/bin/echo -n ${HOME}/goma)',
         }],
         ['host_arch!="ppc" and host_arch!="ppc64" and host_arch!="ppc64le" and host_arch!="s390" and host_arch!="s390x"', {
-          'host_clang%': 0,
+          'host_clang%': 1,
         }, {
           'host_clang%': 0,
         }],
@@ -181,6 +186,7 @@
     },
     'base_dir%': '<(base_dir)',
     'clang_dir%': '<(clang_dir)',
+    'make_clang_dir%': '<(make_clang_dir)',
     'host_arch%': '<(host_arch)',
     'host_clang%': '<(host_clang)',
     'target_arch%': '<(target_arch)',
@@ -193,6 +199,7 @@
     'msan%': '<(msan)',
     'tsan%': '<(tsan)',
     'sanitizer_coverage%': '<(sanitizer_coverage)',
+    'use_prebuilt_instrumented_libraries%': '<(use_prebuilt_instrumented_libraries)',
     'use_custom_libcxx%': '<(use_custom_libcxx)',
     'linux_use_bundled_gold%': '<(linux_use_bundled_gold)',
     'use_lto%': '<(use_lto)',
@@ -236,6 +243,9 @@
     # Relative path to icu.gyp from this file.
     'icu_gyp_path': '../third_party/icu/icu.gyp',
 
+    # Relative path to inspector.gyp from this file.
+    'inspector_gyp_path': '../src/v8-inspector/inspector.gyp',
+
     'conditions': [
       ['(v8_target_arch=="arm" and host_arch!="arm") or \
         (v8_target_arch=="arm64" and host_arch!="arm64") or \
@@ -246,6 +256,18 @@
         'want_separate_host_toolset': 1,
       }, {
         'want_separate_host_toolset': 0,
+      }],
+      ['(v8_target_arch=="arm" and host_arch!="arm") or \
+        (v8_target_arch=="arm64" and host_arch!="arm64") or \
+        (v8_target_arch=="mipsel" and host_arch!="mipsel") or \
+        (v8_target_arch=="mips64el" and host_arch!="mips64el") or \
+        (v8_target_arch=="mips" and host_arch!="mips") or \
+        (v8_target_arch=="mips64" and host_arch!="mips64") or \
+        (v8_target_arch=="x64" and host_arch!="x64") or \
+        (OS=="android" or OS=="qnx")', {
+        'want_separate_host_toolset_mkpeephole': 1,
+      }, {
+        'want_separate_host_toolset_mkpeephole': 0,
       }],
       ['OS == "win"', {
         'os_posix%': 0,
@@ -298,7 +320,7 @@
             'android_ndk_root%': '<(base_dir)/third_party/android_tools/ndk/',
             'android_host_arch%': "<!(uname -m | sed -e 's/i[3456]86/x86/')",
             # Version of the NDK. Used to ensure full rebuilds on NDK rolls.
-            'android_ndk_version%': 'r11c',
+            'android_ndk_version%': 'r12b',
             'host_os%': "<!(uname -s | sed -e 's/Linux/linux/;s/Darwin/mac/')",
             'os_folder_name%': "<!(uname -s | sed -e 's/Linux/linux/;s/Darwin/darwin/')",
           },
@@ -357,11 +379,14 @@
         'arm_version%': '<(arm_version)',
         'host_os%': '<(host_os)',
 
+        # Print to stdout on Android.
+        'v8_android_log_stdout%': 1,
+
         'conditions': [
           ['android_ndk_root==""', {
             'variables': {
               'android_sysroot': '<(android_toolchain)/sysroot/',
-              'android_stl': '<(android_ndk_root)/sources/cxx-stl/',
+              'android_stl': '<(android_toolchain)/sources/cxx-stl/',
             },
             'conditions': [
               ['target_arch=="x64"', {
@@ -406,8 +431,6 @@
         'host_cc': '<(clang_dir)/bin/clang',
         'host_cxx': '<(clang_dir)/bin/clang++',
       }, {
-            'host_ld': '<!(which ld)',
-            'host_ranlib': '<!(which ranlib)',
         'host_cc': '<!(which gcc)',
         'host_cxx': '<!(which g++)',
       }],
@@ -416,7 +439,7 @@
     'arm_version%': 'default',
     'arm_fpu%': 'vfpv3',
     'arm_float_abi%': 'default',
-    'arm_thumb': '1',
+    'arm_thumb': 'default',
 
     # Default MIPS variable settings.
     'mips_arch_variant%': 'r2',
@@ -432,8 +455,11 @@
     'variables': {
       'v8_code%': '<(v8_code)',
       'clang_warning_flags': [
+        '-Wsign-compare',
         # TODO(thakis): https://crbug.com/604888
         '-Wno-undefined-var-template',
+        # TODO(yangguo): issue 5258
+        '-Wno-nonportable-include-path',
       ],
       'conditions':[
         ['OS=="android"', {
@@ -478,7 +504,9 @@
     },
     'conditions':[
       ['clang==0', {
-        'cflags+': ['-Wno-sign-compare',],
+        'cflags+': [
+          '-Wno-uninitialized',
+        ],
       }],
       ['clang==1 or host_clang==1', {
         # This is here so that all files get recompiled after a clang roll and
@@ -642,6 +670,11 @@
                   'MEMORY_SANITIZER',
                 ],
               }],
+            ],
+          }],
+          ['use_prebuilt_instrumented_libraries==1', {
+            'dependencies': [
+              '<(DEPTH)/third_party/instrumented_libraries/instrumented_libraries.gyp:prebuilt_instrumented_libraries',
             ],
           }],
           ['use_custom_libcxx==1', {
@@ -1092,7 +1125,6 @@
       'target_defaults': {
         'defines': [
           'ANDROID',
-          'V8_ANDROID_LOG_STDOUT',
         ],
         'configurations': {
           'Release': {
@@ -1149,9 +1181,6 @@
               ],
               'libraries': [
                 '-l<(android_libcpp_library)',
-                '-lc++abi',
-                '-landroid_support',
-                '-lunwind',
                 '-latomic',
                 # Manually link the libgcc.a that the cross compiler uses.
                 '<!(<(android_toolchain)/*-gcc -print-libgcc-file-name)',
@@ -1166,7 +1195,7 @@
                   '-Wl,--icf=safe',
                 ],
               }],
-              ['target_arch=="arm" and arm_version==7 and clang==0', {
+              ['target_arch=="arm" and arm_version==7', {
                 'cflags': [
                   '-march=armv7-a',
                   '-mtune=cortex-a8',

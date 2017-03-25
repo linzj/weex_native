@@ -183,11 +183,6 @@ def _get_service_event(event_type,
       version = event.service_event.code_version.add()
       version.source_url = version_d['source_url']
       if 'revision' in version_d:
-        # Rely on the url to switch between svn and git because an
-        # abbreviated sha1 can sometimes be confused with an int.
-        if version.source_url.startswith('svn://'):
-          version.svn_revision = int(version_d['revision'])
-        else:
           version.git_hash = version_d['revision']
 
       if 'version' in version_d:
@@ -233,7 +228,7 @@ def send_service_event(event_type,
 
     code_version (list/tuple of dict or None): required keys are
         'source_url' -> full url to the repository
-        'revision' -> (string) git sha1 or svn revision number.
+        'revision' -> (string) git sha1
       optional keys are
         'dirty' -> boolean. True if the local source tree has local
             modification.
@@ -261,6 +256,7 @@ def get_build_event(event_type,
                     build_number=None,
                     build_scheduling_time=None,
                     step_name=None,
+                    step_text=None,
                     step_number=None,
                     result=None,
                     extra_result_code=None,
@@ -269,7 +265,11 @@ def get_build_event(event_type,
                     service_name=None,
                     goma_stats=None,
                     goma_error=None,
-                    goma_crash_report_id=None):
+                    goma_crash_report_id=None,
+                    patch_url=None,
+                    bbucket_id=None,
+                    category=None,
+                    head_revision_git_hash=None):
   """Compute a ChromeInfraEvent filled with a BuildEvent.
 
   Arguments are identical to those in send_build_event(), please refer
@@ -328,9 +328,29 @@ def get_build_event(event_type,
                     event.build_event.build_scheduling_time_ms)
 
   if step_name:
-    event.build_event.step_name = step_name
+    event.build_event.step_name = str(step_name)
+  if step_text:
+    event.build_event.step_text = str(step_text)
+
   if step_number is not None:
     event.build_event.step_number = step_number
+  if patch_url is not None:
+    event.build_event.patch_url = patch_url
+  if bbucket_id is not None:
+    try:
+      event.build_event.bbucket_id = int(bbucket_id)
+    except (ValueError, TypeError):
+      pass
+
+  if category:
+    event.build_event.category = {
+      'cq': BuildEvent.CATEGORY_CQ,
+      'cq_experimental': BuildEvent.CATEGORY_CQ_EXPERIMENTAL,
+      'git_cl_try': BuildEvent.CATEGORY_GIT_CL_TRY,
+    }.get(category.lower(), BuildEvent.CATEGORY_UNKNOWN)
+
+  if head_revision_git_hash:
+    event.build_event.head_revision.git_hash = head_revision_git_hash
 
   if event.build_event.step_name:
     if event_type != 'STEP':
@@ -416,6 +436,7 @@ def send_build_event(event_type,
                      build_number=None,
                      build_scheduling_time=None,
                      step_name=None,
+                     step_text=None,
                      step_number=None,
                      result=None,
                      extra_result_code=None,
@@ -423,7 +444,11 @@ def send_build_event(event_type,
                      event_timestamp=None,
                      goma_stats=None,
                      goma_error=None,
-                     goma_crash_report_id=None):
+                     goma_crash_report_id=None,
+                     patch_url=None,
+                     bbucket_id=None,
+                     category=None,
+                     head_revision_git_hash=None):
   """Send a ChromeInfraEvent filled with a BuildEvent
 
   Args:
@@ -439,6 +464,7 @@ def send_build_event(event_type,
       scheduled. This is required when build_number is provided to make it
       possibly to distinguish two builds with the same build number.
     step_name (str): name of the step.
+    step_text (str): text of the step.
     step_number (int): rank of the step in the build. This is mandatory
       if step_name is provided, because step_name is not enough to tell the
       order.
@@ -449,6 +475,10 @@ def send_build_event(event_type,
     goma_stats (goma_stats_pb2.GomaStats): statistics output by the Goma proxy.
     goma_error (string): goma error type defined as GomaErrorType.
     goma_crash_report_id (string): id of goma crash report.
+    patch_url (string): URL of the patch that triggered build
+    bbucket_id (long): Buildbucket ID of the build.
+    category (string): Build category, e.g. cq or git_cl_try.
+    head_revision_git_hash (string): Revision fetched from the Git repository.
 
   Returns:
     success (bool): False if some error happened.
@@ -459,6 +489,7 @@ def send_build_event(event_type,
                          build_number=build_number,
                          build_scheduling_time=build_scheduling_time,
                          step_name=step_name,
+                         step_text=step_text,
                          step_number=step_number,
                          result=result,
                          extra_result_code=extra_result_code,
@@ -466,7 +497,11 @@ def send_build_event(event_type,
                          event_timestamp=event_timestamp,
                          goma_stats=goma_stats,
                          goma_error=goma_error,
-                         goma_crash_report_id=goma_crash_report_id).send()
+                         goma_crash_report_id=goma_crash_report_id,
+                         patch_url=patch_url,
+                         bbucket_id=bbucket_id,
+                         category=category,
+                         head_revision_git_hash=head_revision_git_hash).send()
 
 
 def send_events(events):

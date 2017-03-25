@@ -5,6 +5,8 @@
 #ifndef V8_INTERPRETER_BYTECODE_ARRAY_WRITER_H_
 #define V8_INTERPRETER_BYTECODE_ARRAY_WRITER_H_
 
+#include "src/base/compiler-specific.h"
+#include "src/globals.h"
 #include "src/interpreter/bytecode-pipeline.h"
 #include "src/source-position-table.h"
 
@@ -20,10 +22,12 @@ class ConstantArrayBuilder;
 
 // Class for emitting bytecode as the final stage of the bytecode
 // generation pipeline.
-class BytecodeArrayWriter final : public BytecodePipelineStage {
+class V8_EXPORT_PRIVATE BytecodeArrayWriter final
+    : public NON_EXPORTED_BASE(BytecodePipelineStage) {
  public:
-  BytecodeArrayWriter(Isolate* isolate, Zone* zone,
-                      ConstantArrayBuilder* constant_array_builder);
+  BytecodeArrayWriter(
+      Zone* zone, ConstantArrayBuilder* constant_array_builder,
+      SourcePositionTableBuilder::RecordingMode source_position_mode);
   virtual ~BytecodeArrayWriter();
 
   // BytecodePipelineStage interface.
@@ -32,7 +36,7 @@ class BytecodeArrayWriter final : public BytecodePipelineStage {
   void BindLabel(BytecodeLabel* label) override;
   void BindLabel(const BytecodeLabel& target, BytecodeLabel* label) override;
   Handle<BytecodeArray> ToBytecodeArray(
-      int fixed_register_count, int parameter_count,
+      Isolate* isolate, int register_count, int parameter_count,
       Handle<FixedArray> handler_table) override;
 
  private:
@@ -61,7 +65,6 @@ class BytecodeArrayWriter final : public BytecodePipelineStage {
   void EmitJump(BytecodeNode* node, BytecodeLabel* label);
   void UpdateSourcePositionTable(const BytecodeNode* const node);
 
-  Isolate* isolate() { return isolate_; }
   ZoneVector<uint8_t>* bytecodes() { return &bytecodes_; }
   SourcePositionTableBuilder* source_position_table_builder() {
     return &source_position_table_builder_;
@@ -69,11 +72,8 @@ class BytecodeArrayWriter final : public BytecodePipelineStage {
   ConstantArrayBuilder* constant_array_builder() {
     return constant_array_builder_;
   }
-  int max_register_count() { return max_register_count_; }
 
-  Isolate* isolate_;
   ZoneVector<uint8_t> bytecodes_;
-  int max_register_count_;
   int unbound_jumps_;
   SourcePositionTableBuilder source_position_table_builder_;
   ConstantArrayBuilder* constant_array_builder_;

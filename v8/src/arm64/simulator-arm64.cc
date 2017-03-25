@@ -55,6 +55,9 @@ TEXT_COLOUR clr_debug_number   = FLAG_log_colour ? COLOUR_BOLD(YELLOW)  : "";
 TEXT_COLOUR clr_debug_message  = FLAG_log_colour ? COLOUR(YELLOW)       : "";
 TEXT_COLOUR clr_printf         = FLAG_log_colour ? COLOUR(GREEN)        : "";
 
+// static
+base::LazyInstance<Simulator::GlobalMonitor>::type Simulator::global_monitor_ =
+    LAZY_INSTANCE_INITIALIZER;
 
 // This is basically the same as PrintF, with a guard for FLAG_trace_sim.
 void Simulator::TraceSim(const char* format, ...) {
@@ -429,6 +432,7 @@ void Simulator::ResetState() {
 
 
 Simulator::~Simulator() {
+  global_monitor_.Pointer()->RemoveProcessor(&global_monitor_processor_);
   delete[] reinterpret_cast<byte*>(stack_);
   if (FLAG_log_instruction_stats) {
     delete instrument_;
@@ -524,7 +528,8 @@ class Redirection {
 
 
 // static
-void Simulator::TearDown(base::HashMap* i_cache, Redirection* first) {
+void Simulator::TearDown(base::CustomMatcherHashMap* i_cache,
+                         Redirection* first) {
   Redirection::DeleteChain(first);
 }
 
@@ -888,36 +893,31 @@ int Simulator::CodeFromName(const char* name) {
 
 // Helpers ---------------------------------------------------------------------
 template <typename T>
-T Simulator::AddWithCarry(bool set_flags,
-                          T src1,
-                          T src2,
-                          T carry_in) {
-  typedef typename make_unsigned<T>::type unsignedT;
+T Simulator::AddWithCarry(bool set_flags, T left, T right, int carry_in) {
+  // Use unsigned types to avoid implementation-defined overflow behaviour.
+  static_assert(std::is_unsigned<T>::value, "operands must be unsigned");
+  static_assert((sizeof(T) == kWRegSize) || (sizeof(T) == kXRegSize),
+                "Only W- or X-sized operands are tested");
+
   DCHECK((carry_in == 0) || (carry_in == 1));
-
-  T signed_sum = src1 + src2 + carry_in;
-  T result = signed_sum;
-
-  bool N, Z, C, V;
-
-  // Compute the C flag
-  unsignedT u1 = static_cast<unsignedT>(src1);
-  unsignedT u2 = static_cast<unsignedT>(src2);
-  unsignedT urest = std::numeric_limits<unsignedT>::max() - u1;
-  C = (u2 > urest) || (carry_in && (((u2 + 1) > urest) || (u2 > (urest - 1))));
-
-  // Overflow iff the sign bit is the same for the two inputs and different
-  // for the result.
-  V = ((src1 ^ src2) >= 0) && ((src1 ^ result) < 0);
-
-  N = CalcNFlag(result);
-  Z = CalcZFlag(result);
+  T result = left + right + carry_in;
 
   if (set_flags) {
-    nzcv().SetN(N);
-    nzcv().SetZ(Z);
-    nzcv().SetC(C);
-    nzcv().SetV(V);
+    nzcv().SetN(CalcNFlag(result));
+    nzcv().SetZ(CalcZFlag(result));
+
+    // Compute the C flag by comparing the result to the max unsigned integer.
+    T max_uint_2op = std::numeric_limits<T>::max() - carry_in;
+    nzcv().SetC((left > max_uint_2op) || ((max_uint_2op - left) < right));
+
+    // Overflow iff the sign bit is the same for the two inputs and different
+    // for the result.
+    T sign_mask = T(1) << (sizeof(T) * 8 - 1);
+    T left_sign = left & sign_mask;
+    T right_sign = right & sign_mask;
+    T result_sign = result & sign_mask;
+    nzcv().SetV((left_sign == right_sign) && (left_sign != result_sign));
+
     LogSystemRegister(NZCV);
   }
   return result;
@@ -926,6 +926,9 @@ T Simulator::AddWithCarry(bool set_flags,
 
 template<typename T>
 void Simulator::AddSubWithCarry(Instruction* instr) {
+  // Use unsigned types to avoid implementation-defined overflow behaviour.
+  static_assert(std::is_unsigned<T>::value, "operands must be unsigned");
+
   T op2 = reg<T>(instr->Rm());
   T new_val;
 
@@ -1418,6 +1421,9 @@ void Simulator::VisitCompareBranch(Instruction* instr) {
 
 template<typename T>
 void Simulator::AddSubHelper(Instruction* instr, T op2) {
+  // Use unsigned types to avoid implementation-defined overflow behaviour.
+  static_assert(std::is_unsigned<T>::value, "operands must be unsigned");
+
   bool set_flags = instr->FlagsUpdate();
   T new_val = 0;
   Instr operation = instr->Mask(AddSubOpMask);
@@ -1450,11 +1456,10 @@ void Simulator::VisitAddSubShifted(Instruction* instr) {
   unsigned shift_amount = instr->ImmDPShift();
 
   if (instr->SixtyFourBits()) {
-    int64_t op2 = ShiftOperand(xreg(instr->Rm()), shift_type, shift_amount);
+    uint64_t op2 = ShiftOperand(xreg(instr->Rm()), shift_type, shift_amount);
     AddSubHelper(instr, op2);
   } else {
-    int32_t op2 = static_cast<int32_t>(
-        ShiftOperand(wreg(instr->Rm()), shift_type, shift_amount));
+    uint32_t op2 = ShiftOperand(wreg(instr->Rm()), shift_type, shift_amount);
     AddSubHelper(instr, op2);
   }
 }
@@ -1463,9 +1468,9 @@ void Simulator::VisitAddSubShifted(Instruction* instr) {
 void Simulator::VisitAddSubImmediate(Instruction* instr) {
   int64_t op2 = instr->ImmAddSub() << ((instr->ShiftAddSub() == 1) ? 12 : 0);
   if (instr->SixtyFourBits()) {
-    AddSubHelper<int64_t>(instr, op2);
+    AddSubHelper(instr, static_cast<uint64_t>(op2));
   } else {
-    AddSubHelper<int32_t>(instr, static_cast<int32_t>(op2));
+    AddSubHelper(instr, static_cast<uint32_t>(op2));
   }
 }
 
@@ -1474,10 +1479,10 @@ void Simulator::VisitAddSubExtended(Instruction* instr) {
   Extend ext = static_cast<Extend>(instr->ExtendMode());
   unsigned left_shift = instr->ImmExtendShift();
   if (instr->SixtyFourBits()) {
-    int64_t op2 = ExtendValue(xreg(instr->Rm()), ext, left_shift);
+    uint64_t op2 = ExtendValue(xreg(instr->Rm()), ext, left_shift);
     AddSubHelper(instr, op2);
   } else {
-    int32_t op2 = ExtendValue(wreg(instr->Rm()), ext, left_shift);
+    uint32_t op2 = ExtendValue(wreg(instr->Rm()), ext, left_shift);
     AddSubHelper(instr, op2);
   }
 }
@@ -1485,9 +1490,9 @@ void Simulator::VisitAddSubExtended(Instruction* instr) {
 
 void Simulator::VisitAddSubWithCarry(Instruction* instr) {
   if (instr->SixtyFourBits()) {
-    AddSubWithCarry<int64_t>(instr);
+    AddSubWithCarry<uint64_t>(instr);
   } else {
-    AddSubWithCarry<int32_t>(instr);
+    AddSubWithCarry<uint32_t>(instr);
   }
 }
 
@@ -1497,22 +1502,22 @@ void Simulator::VisitLogicalShifted(Instruction* instr) {
   unsigned shift_amount = instr->ImmDPShift();
 
   if (instr->SixtyFourBits()) {
-    int64_t op2 = ShiftOperand(xreg(instr->Rm()), shift_type, shift_amount);
+    uint64_t op2 = ShiftOperand(xreg(instr->Rm()), shift_type, shift_amount);
     op2 = (instr->Mask(NOT) == NOT) ? ~op2 : op2;
-    LogicalHelper<int64_t>(instr, op2);
+    LogicalHelper(instr, op2);
   } else {
-    int32_t op2 = ShiftOperand(wreg(instr->Rm()), shift_type, shift_amount);
+    uint32_t op2 = ShiftOperand(wreg(instr->Rm()), shift_type, shift_amount);
     op2 = (instr->Mask(NOT) == NOT) ? ~op2 : op2;
-    LogicalHelper<int32_t>(instr, op2);
+    LogicalHelper(instr, op2);
   }
 }
 
 
 void Simulator::VisitLogicalImmediate(Instruction* instr) {
   if (instr->SixtyFourBits()) {
-    LogicalHelper<int64_t>(instr, instr->ImmLogical());
+    LogicalHelper(instr, static_cast<uint64_t>(instr->ImmLogical()));
   } else {
-    LogicalHelper<int32_t>(instr, static_cast<int32_t>(instr->ImmLogical()));
+    LogicalHelper(instr, static_cast<uint32_t>(instr->ImmLogical()));
   }
 }
 
@@ -1548,24 +1553,27 @@ void Simulator::LogicalHelper(Instruction* instr, T op2) {
 
 void Simulator::VisitConditionalCompareRegister(Instruction* instr) {
   if (instr->SixtyFourBits()) {
-    ConditionalCompareHelper(instr, xreg(instr->Rm()));
+    ConditionalCompareHelper(instr, static_cast<uint64_t>(xreg(instr->Rm())));
   } else {
-    ConditionalCompareHelper(instr, wreg(instr->Rm()));
+    ConditionalCompareHelper(instr, static_cast<uint32_t>(wreg(instr->Rm())));
   }
 }
 
 
 void Simulator::VisitConditionalCompareImmediate(Instruction* instr) {
   if (instr->SixtyFourBits()) {
-    ConditionalCompareHelper<int64_t>(instr, instr->ImmCondCmp());
+    ConditionalCompareHelper(instr, static_cast<uint64_t>(instr->ImmCondCmp()));
   } else {
-    ConditionalCompareHelper<int32_t>(instr, instr->ImmCondCmp());
+    ConditionalCompareHelper(instr, static_cast<uint32_t>(instr->ImmCondCmp()));
   }
 }
 
 
 template<typename T>
 void Simulator::ConditionalCompareHelper(Instruction* instr, T op2) {
+  // Use unsigned types to avoid implementation-defined overflow behaviour.
+  static_assert(std::is_unsigned<T>::value, "operands must be unsigned");
+
   T op1 = reg<T>(instr->Rn());
 
   if (ConditionPassed(static_cast<Condition>(instr->Condition()))) {
@@ -1623,6 +1631,15 @@ void Simulator::LoadStoreHelper(Instruction* instr,
   unsigned addr_reg = instr->Rn();
   uintptr_t address = LoadStoreAddress(addr_reg, offset, addrmode);
   uintptr_t stack = 0;
+
+  base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+  if (instr->IsLoad()) {
+    local_monitor_.NotifyLoad(address);
+  } else {
+    local_monitor_.NotifyStore(address);
+    global_monitor_.Pointer()->NotifyStore_Locked(address,
+                                                  &global_monitor_processor_);
+  }
 
   // Handle the writeback for stores before the store. On a CPU the writeback
   // and the store are atomic, but when running on the simulator it is possible
@@ -1725,6 +1742,19 @@ void Simulator::LoadStorePairHelper(Instruction* instr,
   uintptr_t address = LoadStoreAddress(addr_reg, offset, addrmode);
   uintptr_t address2 = address + access_size;
   uintptr_t stack = 0;
+
+  base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+  if (instr->IsLoad()) {
+    local_monitor_.NotifyLoad(address);
+    local_monitor_.NotifyLoad(address2);
+  } else {
+    local_monitor_.NotifyStore(address);
+    local_monitor_.NotifyStore(address2);
+    global_monitor_.Pointer()->NotifyStore_Locked(address,
+                                                  &global_monitor_processor_);
+    global_monitor_.Pointer()->NotifyStore_Locked(address2,
+                                                  &global_monitor_processor_);
+  }
 
   // Handle the writeback for stores before the store. On a CPU the writeback
   // and the store are atomic, but when running on the simulator it is possible
@@ -1849,6 +1879,9 @@ void Simulator::VisitLoadLiteral(Instruction* instr) {
   uintptr_t address = instr->LiteralAddress();
   unsigned rt = instr->Rt();
 
+  base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+  local_monitor_.NotifyLoad(address);
+
   switch (instr->Mask(LoadLiteralMask)) {
     // Use _no_log variants to suppress the register trace (LOG_REGS,
     // LOG_FP_REGS), then print a more detailed log.
@@ -1902,8 +1935,81 @@ void Simulator::LoadStoreWriteBack(unsigned addr_reg,
   }
 }
 
+Simulator::TransactionSize Simulator::get_transaction_size(unsigned size) {
+  switch (size) {
+    case 0:
+      return TransactionSize::None;
+    case 1:
+      return TransactionSize::Byte;
+    case 2:
+      return TransactionSize::HalfWord;
+    case 4:
+      return TransactionSize::Word;
+    default:
+      UNREACHABLE();
+  }
+  return TransactionSize::None;
+}
+
 void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
-  // TODO(binji)
+  unsigned rs = instr->Rs();
+  unsigned rt = instr->Rt();
+  unsigned rn = instr->Rn();
+  LoadStoreAcquireReleaseOp op = static_cast<LoadStoreAcquireReleaseOp>(
+      instr->Mask(LoadStoreAcquireReleaseMask));
+  int32_t is_acquire_release = instr->LoadStoreXAcquireRelease();
+  int32_t is_not_exclusive = instr->LoadStoreXNotExclusive();
+  int32_t is_load = instr->LoadStoreXLoad();
+  int32_t is_pair = instr->LoadStoreXPair();
+  DCHECK_NE(is_acquire_release, 0);
+  DCHECK_EQ(is_not_exclusive, 0);  // Non exclusive unimplemented.
+  DCHECK_EQ(is_pair, 0);           // Pair unimplemented.
+  unsigned access_size = 1 << instr->LoadStoreXSizeLog2();
+  uintptr_t address = LoadStoreAddress(rn, 0, AddrMode::Offset);
+  DCHECK(address % access_size == 0);
+  base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+  if (is_load != 0) {
+    local_monitor_.NotifyLoadExcl(address, get_transaction_size(access_size));
+    global_monitor_.Pointer()->NotifyLoadExcl_Locked(
+        address, &global_monitor_processor_);
+    switch (op) {
+      case LDAXR_b:
+        set_wreg_no_log(rt, MemoryRead<uint8_t>(address));
+        break;
+      case LDAXR_h:
+        set_wreg_no_log(rt, MemoryRead<uint16_t>(address));
+        break;
+      case LDAXR_w:
+        set_wreg_no_log(rt, MemoryRead<uint32_t>(address));
+        break;
+      default:
+        UNIMPLEMENTED();
+    }
+    LogRead(address, access_size, rt);
+  } else {
+    if (local_monitor_.NotifyStoreExcl(address,
+                                       get_transaction_size(access_size)) &&
+        global_monitor_.Pointer()->NotifyStoreExcl_Locked(
+            address, &global_monitor_processor_)) {
+      switch (op) {
+        case STLXR_b:
+          MemoryWrite<uint8_t>(address, wreg(rt));
+          break;
+        case STLXR_h:
+          MemoryWrite<uint16_t>(address, wreg(rt));
+          break;
+        case STLXR_w:
+          MemoryWrite<uint32_t>(address, wreg(rt));
+          break;
+        default:
+          UNIMPLEMENTED();
+      }
+      LogWrite(address, access_size, rt);
+      set_wreg(rs, 0);
+    } else {
+      set_wreg(rs, 1);
+    }
+  }
 }
 
 void Simulator::CheckMemoryAccess(uintptr_t address, uintptr_t stack) {
@@ -3873,6 +3979,186 @@ void Simulator::DoPrintf(Instruction* instr) {
   delete[] format;
 }
 
+Simulator::LocalMonitor::LocalMonitor()
+    : access_state_(MonitorAccess::Open),
+      tagged_addr_(0),
+      size_(TransactionSize::None) {}
+
+void Simulator::LocalMonitor::Clear() {
+  access_state_ = MonitorAccess::Open;
+  tagged_addr_ = 0;
+  size_ = TransactionSize::None;
+}
+
+void Simulator::LocalMonitor::NotifyLoad(uintptr_t addr) {
+  if (access_state_ == MonitorAccess::Exclusive) {
+    // A non exclusive load could clear the local monitor. As a result, it's
+    // most strict to unconditionally clear the local monitor on load.
+    Clear();
+  }
+}
+
+void Simulator::LocalMonitor::NotifyLoadExcl(uintptr_t addr,
+                                             TransactionSize size) {
+  access_state_ = MonitorAccess::Exclusive;
+  tagged_addr_ = addr;
+  size_ = size;
+}
+
+void Simulator::LocalMonitor::NotifyStore(uintptr_t addr) {
+  if (access_state_ == MonitorAccess::Exclusive) {
+    // A non exclusive store could clear the local monitor. As a result, it's
+    // most strict to unconditionally clear the local monitor on store.
+    Clear();
+  }
+}
+
+bool Simulator::LocalMonitor::NotifyStoreExcl(uintptr_t addr,
+                                              TransactionSize size) {
+  if (access_state_ == MonitorAccess::Exclusive) {
+    // It is allowed for a processor to require that the address matches
+    // exactly (B2.10.1), so this comparison does not mask addr.
+    if (addr == tagged_addr_ && size_ == size) {
+      Clear();
+      return true;
+    } else {
+      // It is implementation-defined whether an exclusive store to a
+      // non-tagged address will update memory. As a result, it's most strict
+      // to unconditionally clear the local monitor.
+      Clear();
+      return false;
+    }
+  } else {
+    DCHECK(access_state_ == MonitorAccess::Open);
+    return false;
+  }
+}
+
+Simulator::GlobalMonitor::Processor::Processor()
+    : access_state_(MonitorAccess::Open),
+      tagged_addr_(0),
+      next_(nullptr),
+      prev_(nullptr),
+      failure_counter_(0) {}
+
+void Simulator::GlobalMonitor::Processor::Clear_Locked() {
+  access_state_ = MonitorAccess::Open;
+  tagged_addr_ = 0;
+}
+
+void Simulator::GlobalMonitor::Processor::NotifyLoadExcl_Locked(
+    uintptr_t addr) {
+  access_state_ = MonitorAccess::Exclusive;
+  tagged_addr_ = addr;
+}
+
+void Simulator::GlobalMonitor::Processor::NotifyStore_Locked(
+    uintptr_t addr, bool is_requesting_processor) {
+  if (access_state_ == MonitorAccess::Exclusive) {
+    // A non exclusive store could clear the global monitor. As a result, it's
+    // most strict to unconditionally clear global monitors on store.
+    Clear_Locked();
+  }
+}
+
+bool Simulator::GlobalMonitor::Processor::NotifyStoreExcl_Locked(
+    uintptr_t addr, bool is_requesting_processor) {
+  if (access_state_ == MonitorAccess::Exclusive) {
+    if (is_requesting_processor) {
+      // It is allowed for a processor to require that the address matches
+      // exactly (B2.10.2), so this comparison does not mask addr.
+      if (addr == tagged_addr_) {
+        Clear_Locked();
+        // Introduce occasional stxr failures. This is to simulate the
+        // behavior of hardware, which can randomly fail due to background
+        // cache evictions.
+        if (failure_counter_++ >= kMaxFailureCounter) {
+          failure_counter_ = 0;
+          return false;
+        } else {
+          return true;
+        }
+      }
+    } else if ((addr & kExclusiveTaggedAddrMask) ==
+               (tagged_addr_ & kExclusiveTaggedAddrMask)) {
+      // Check the masked addresses when responding to a successful lock by
+      // another processor so the implementation is more conservative (i.e. the
+      // granularity of locking is as large as possible.)
+      Clear_Locked();
+      return false;
+    }
+  }
+  return false;
+}
+
+Simulator::GlobalMonitor::GlobalMonitor() : head_(nullptr) {}
+
+void Simulator::GlobalMonitor::NotifyLoadExcl_Locked(uintptr_t addr,
+                                                     Processor* processor) {
+  processor->NotifyLoadExcl_Locked(addr);
+  PrependProcessor_Locked(processor);
+}
+
+void Simulator::GlobalMonitor::NotifyStore_Locked(uintptr_t addr,
+                                                  Processor* processor) {
+  // Notify each processor of the store operation.
+  for (Processor* iter = head_; iter; iter = iter->next_) {
+    bool is_requesting_processor = iter == processor;
+    iter->NotifyStore_Locked(addr, is_requesting_processor);
+  }
+}
+
+bool Simulator::GlobalMonitor::NotifyStoreExcl_Locked(uintptr_t addr,
+                                                      Processor* processor) {
+  DCHECK(IsProcessorInLinkedList_Locked(processor));
+  if (processor->NotifyStoreExcl_Locked(addr, true)) {
+    // Notify the other processors that this StoreExcl succeeded.
+    for (Processor* iter = head_; iter; iter = iter->next_) {
+      if (iter != processor) {
+        iter->NotifyStoreExcl_Locked(addr, false);
+      }
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
+bool Simulator::GlobalMonitor::IsProcessorInLinkedList_Locked(
+    Processor* processor) const {
+  return head_ == processor || processor->next_ || processor->prev_;
+}
+
+void Simulator::GlobalMonitor::PrependProcessor_Locked(Processor* processor) {
+  if (IsProcessorInLinkedList_Locked(processor)) {
+    return;
+  }
+
+  if (head_) {
+    head_->prev_ = processor;
+  }
+  processor->prev_ = nullptr;
+  processor->next_ = head_;
+  head_ = processor;
+}
+
+void Simulator::GlobalMonitor::RemoveProcessor(Processor* processor) {
+  base::LockGuard<base::Mutex> lock_guard(&mutex);
+  if (!IsProcessorInLinkedList_Locked(processor)) {
+    return;
+  }
+
+  if (processor->prev_) {
+    processor->prev_->next_ = processor->next_;
+  } else {
+    head_ = processor->next_;
+  }
+  if (processor->next_) {
+    processor->next_->prev_ = processor->prev_;
+  }
+  processor->prev_ = nullptr;
+  processor->next_ = nullptr;
+}
 
 #endif  // USE_SIMULATOR
 

@@ -205,10 +205,10 @@ class LCodeGen: public LCodeGenBase {
   void RegisterEnvironmentForDeoptimization(LEnvironment* environment,
                                             Safepoint::DeoptMode mode);
   void DeoptimizeIf(Condition cc, LInstruction* instr,
-                    Deoptimizer::DeoptReason deopt_reason,
+                    DeoptimizeReason deopt_reason,
                     Deoptimizer::BailoutType bailout_type);
   void DeoptimizeIf(Condition cc, LInstruction* instr,
-                    Deoptimizer::DeoptReason deopt_reason);
+                    DeoptimizeReason deopt_reason);
 
   bool DeoptEveryNTimes() {
     return FLAG_deopt_every_n_times != 0 && !info()->IsStub();
@@ -297,8 +297,6 @@ class LCodeGen: public LCodeGenBase {
 
   template <class T>
   void EmitVectorLoadICRegisters(T* instr);
-  template <class T>
-  void EmitVectorStoreICRegisters(T* instr);
 
 #ifdef _MSC_VER
   // On windows, you may not access the stack more than one page below

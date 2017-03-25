@@ -5,10 +5,12 @@
 #ifndef V8_CCTEST_COMPILER_CODEGEN_TESTER_H_
 #define V8_CCTEST_COMPILER_CODEGEN_TESTER_H_
 
+#include "src/compilation-info.h"
 #include "src/compiler/instruction-selector.h"
 #include "src/compiler/pipeline.h"
 #include "src/compiler/raw-machine-assembler.h"
 #include "src/simulator.h"
+#include "test/cctest/cctest.h"
 #include "test/cctest/compiler/call-tester.h"
 
 namespace v8 {
@@ -38,7 +40,8 @@ class RawMachineAssemblerTester : public HandleAndZoneScope,
                                 p1, p2, p3, p4),
                 true),
             MachineType::PointerRepresentation(),
-            InstructionSelector::SupportedMachineOperatorFlags()) {}
+            InstructionSelector::SupportedMachineOperatorFlags(),
+            InstructionSelector::AlignmentRequirements()) {}
 
   virtual ~RawMachineAssemblerTester() {}
 
@@ -65,7 +68,8 @@ class RawMachineAssemblerTester : public HandleAndZoneScope,
       Schedule* schedule = this->Export();
       CallDescriptor* call_descriptor = this->call_descriptor();
       Graph* graph = this->graph();
-      CompilationInfo info(ArrayVector("testing"), main_isolate(), main_zone());
+      CompilationInfo info(ArrayVector("testing"), main_isolate(), main_zone(),
+                           Code::ComputeFlags(Code::STUB));
       code_ = Pipeline::GenerateCodeForTesting(&info, call_descriptor, graph,
                                                schedule);
     }

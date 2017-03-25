@@ -16,8 +16,6 @@ class RegisterConfigurationUnitTest : public ::testing::Test {
  public:
   RegisterConfigurationUnitTest() {}
   virtual ~RegisterConfigurationUnitTest() {}
-
- private:
 };
 
 TEST_F(RegisterConfigurationUnitTest, BasicProperties) {
@@ -155,9 +153,10 @@ TEST_F(RegisterConfigurationUnitTest, CombineAliasing) {
       test.GetAliases(kFloat64, RegisterConfiguration::kMaxFPRegisters / 2 + 1,
                       kFloat32, &alias_base_index),
       0);
-  EXPECT_EQ(test.GetAliases(kFloat64, RegisterConfiguration::kMaxFPRegisters,
-                            kFloat32, &alias_base_index),
-            0);
+  EXPECT_EQ(
+      test.GetAliases(kFloat64, RegisterConfiguration::kMaxFPRegisters - 1,
+                      kFloat32, &alias_base_index),
+      0);
 }
 
 }  // namespace internal

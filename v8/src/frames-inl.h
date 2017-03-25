@@ -63,6 +63,8 @@ inline StackHandler* StackFrame::top_handler() const {
 
 
 inline Code* StackFrame::LookupCode() const {
+  // TODO(jgruber): This should really check that pc is within the returned
+  // code's instruction range [instruction_start(), instruction_end()[.
   return GetContainingCode(isolate(), pc());
 }
 
@@ -101,28 +103,31 @@ inline ExitFrame::ExitFrame(StackFrameIteratorBase* iterator)
 inline BuiltinExitFrame::BuiltinExitFrame(StackFrameIteratorBase* iterator)
     : ExitFrame(iterator) {}
 
-inline Object* BuiltinExitFrame::target_slot_object() const {
-  return Memory::Object_at(fp() + BuiltinExitFrameConstants::kTargetOffset);
-}
-
-inline Object* BuiltinExitFrame::new_target_slot_object() const {
-  return Memory::Object_at(fp() + BuiltinExitFrameConstants::kNewTargetOffset);
-}
-
 inline Object* BuiltinExitFrame::receiver_slot_object() const {
   // The receiver is the first argument on the frame.
   // fp[1]: return address.
   // fp[2]: the last argument (new target).
   // fp[4]: argc.
   // fp[2 + argc - 1]: receiver.
-  Object* argc_slot =
-      Memory::Object_at(fp() + BuiltinExitFrameConstants::kArgcOffset);
+  Object* argc_slot = argc_slot_object();
   DCHECK(argc_slot->IsSmi());
   int argc = Smi::cast(argc_slot)->value();
 
   const int receiverOffset =
       BuiltinExitFrameConstants::kNewTargetOffset + (argc - 1) * kPointerSize;
   return Memory::Object_at(fp() + receiverOffset);
+}
+
+inline Object* BuiltinExitFrame::argc_slot_object() const {
+  return Memory::Object_at(fp() + BuiltinExitFrameConstants::kArgcOffset);
+}
+
+inline Object* BuiltinExitFrame::target_slot_object() const {
+  return Memory::Object_at(fp() + BuiltinExitFrameConstants::kTargetOffset);
+}
+
+inline Object* BuiltinExitFrame::new_target_slot_object() const {
+  return Memory::Object_at(fp() + BuiltinExitFrameConstants::kNewTargetOffset);
 }
 
 inline StandardFrame::StandardFrame(StackFrameIteratorBase* iterator)
@@ -161,16 +166,16 @@ inline Address StandardFrame::ComputeConstantPoolAddress(Address fp) {
 
 
 inline bool StandardFrame::IsArgumentsAdaptorFrame(Address fp) {
-  Object* frame_type =
-      Memory::Object_at(fp + TypedFrameConstants::kFrameTypeOffset);
-  return frame_type == Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR);
+  intptr_t frame_type =
+      Memory::intptr_at(fp + TypedFrameConstants::kFrameTypeOffset);
+  return frame_type == StackFrame::TypeToMarker(StackFrame::ARGUMENTS_ADAPTOR);
 }
 
 
 inline bool StandardFrame::IsConstructFrame(Address fp) {
-  Object* frame_type =
-      Memory::Object_at(fp + TypedFrameConstants::kFrameTypeOffset);
-  return frame_type == Smi::FromInt(StackFrame::CONSTRUCT);
+  intptr_t frame_type =
+      Memory::intptr_at(fp + TypedFrameConstants::kFrameTypeOffset);
+  return frame_type == StackFrame::TypeToMarker(StackFrame::CONSTRUCT);
 }
 
 inline JavaScriptFrame::JavaScriptFrame(StackFrameIteratorBase* iterator)
@@ -247,7 +252,11 @@ inline ArgumentsAdaptorFrame::ArgumentsAdaptorFrame(
 inline BuiltinFrame::BuiltinFrame(StackFrameIteratorBase* iterator)
     : JavaScriptFrame(iterator) {}
 
-inline WasmFrame::WasmFrame(StackFrameIteratorBase* iterator)
+inline WasmCompiledFrame::WasmCompiledFrame(StackFrameIteratorBase* iterator)
+    : StandardFrame(iterator) {}
+
+inline WasmInterpreterEntryFrame::WasmInterpreterEntryFrame(
+    StackFrameIteratorBase* iterator)
     : StandardFrame(iterator) {}
 
 inline WasmToJsFrame::WasmToJsFrame(StackFrameIteratorBase* iterator)
@@ -306,13 +315,7 @@ bool StackTraceFrameIterator::is_javascript() const {
 bool StackTraceFrameIterator::is_wasm() const { return frame()->is_wasm(); }
 
 JavaScriptFrame* StackTraceFrameIterator::javascript_frame() const {
-  DCHECK(is_javascript());
-  return static_cast<JavaScriptFrame*>(frame());
-}
-
-WasmFrame* StackTraceFrameIterator::wasm_frame() const {
-  DCHECK(is_wasm());
-  return static_cast<WasmFrame*>(frame());
+  return JavaScriptFrame::cast(frame());
 }
 
 inline StackFrame* SafeStackFrameIterator::frame() const {

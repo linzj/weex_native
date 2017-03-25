@@ -298,9 +298,6 @@ TEST(DisasmIa320) {
 
   __ jmp(&L1);
   __ jmp(Operand(ebx, ecx, times_4, 10000));
-  ExternalReference after_break_target =
-      ExternalReference::debug_after_break_target_address(isolate);
-  __ jmp(Operand::StaticVariable(after_break_target));
   __ jmp(ic, RelocInfo::CODE_TARGET);
   __ nop();
 
@@ -390,6 +387,9 @@ TEST(DisasmIa320) {
   {
     // Move operation
     __ movaps(xmm0, xmm1);
+    __ movups(xmm0, xmm1);
+    __ movups(xmm0, Operand(edx, 4));
+    __ movups(Operand(edx, 4), xmm0);
     __ shufps(xmm0, xmm0, 0x0);
     __ cvtsd2ss(xmm0, xmm1);
     __ cvtsd2ss(xmm0, Operand(ebx, ecx, times_4, 10000));

@@ -206,6 +206,7 @@ const Register kRootRegister = r29;          // Roots array pointer.
 const Register cp = r30;                     // JavaScript context pointer.
 
 static const bool kSimpleFPAliasing = true;
+static const bool kSimdMaskRegisters = false;
 
 // Double word FP register.
 struct DoubleRegister {
@@ -469,17 +470,10 @@ class Assembler : public AssemblerBase {
   INLINE(static void set_target_address_at(
       Isolate* isolate, Address pc, Address constant_pool, Address target,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED));
-  INLINE(static Address target_address_at(Address pc, Code* code)) {
-    Address constant_pool = code ? code->constant_pool() : NULL;
-    return target_address_at(pc, constant_pool);
-  }
+  INLINE(static Address target_address_at(Address pc, Code* code));
   INLINE(static void set_target_address_at(
       Isolate* isolate, Address pc, Code* code, Address target,
-      ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED)) {
-    Address constant_pool = code ? code->constant_pool() : NULL;
-    set_target_address_at(isolate, pc, constant_pool, target,
-                          icache_flush_mode);
-  }
+      ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED));
 
   // Return the code target address at a call site from the return address
   // of that call in the instruction stream.
@@ -558,6 +552,25 @@ class Assembler : public AssemblerBase {
   static inline int encode_crbit(const CRegister& cr, enum CRBit crbit) {
     return ((cr.code() * CRWIDTH) + crbit);
   }
+
+#define DECLARE_PPC_XX3_INSTRUCTIONS(name, instr_name, instr_value)  \
+  inline void name(const DoubleRegister rt, const DoubleRegister ra, \
+                   const DoubleRegister rb) {                        \
+    xx3_form(instr_name, rt, ra, rb);                                \
+  }
+
+  inline void xx3_form(Instr instr, DoubleRegister t, DoubleRegister a,
+                       DoubleRegister b) {
+    int AX = ((a.code() & 0x20) >> 5) & 0x1;
+    int BX = ((b.code() & 0x20) >> 5) & 0x1;
+    int TX = ((t.code() & 0x20) >> 5) & 0x1;
+
+    emit(instr | (t.code() & 0x1F) * B21 | (a.code() & 0x1F) * B16 |
+         (b.code() & 0x1F) * B11 | AX * B2 | BX * B1 | TX);
+  }
+
+  PPC_XX3_OPCODE_LIST(DECLARE_PPC_XX3_INSTRUCTIONS)
+#undef DECLARE_PPC_XX3_INSTRUCTIONS
 
   // ---------------------------------------------------------------------------
   // Code generation
@@ -837,6 +850,8 @@ class Assembler : public AssemblerBase {
             RCBit r = LeaveRC);
   void divwu(Register dst, Register src1, Register src2, OEBit o = LeaveOE,
              RCBit r = LeaveRC);
+  void modsw(Register rt, Register ra, Register rb);
+  void moduw(Register rt, Register ra, Register rb);
 
   void addi(Register dst, Register src, const Operand& imm);
   void addis(Register dst, Register src, const Operand& imm);
@@ -877,6 +892,9 @@ class Assembler : public AssemblerBase {
   void lwzux(Register dst, const MemOperand& src);
   void lwa(Register dst, const MemOperand& src);
   void lwax(Register dst, const MemOperand& src);
+  void ldbrx(Register dst, const MemOperand& src);
+  void lwbrx(Register dst, const MemOperand& src);
+  void lhbrx(Register dst, const MemOperand& src);
   void stb(Register dst, const MemOperand& src);
   void stbx(Register dst, const MemOperand& src);
   void stbux(Register dst, const MemOperand& src);
@@ -929,6 +947,8 @@ class Assembler : public AssemblerBase {
             RCBit r = LeaveRC);
   void divdu(Register dst, Register src1, Register src2, OEBit o = LeaveOE,
              RCBit r = LeaveRC);
+  void modsd(Register rt, Register ra, Register rb);
+  void modud(Register rt, Register ra, Register rb);
 #endif
 
   void rlwinm(Register ra, Register rs, int sh, int mb, int me,
@@ -1185,9 +1205,6 @@ class Assembler : public AssemblerBase {
 
   // Debugging
 
-  // Mark generator continuation.
-  void RecordGeneratorContinuation();
-
   // Mark address of a debug break slot.
   void RecordDebugBreakSlot(RelocInfo::Mode mode);
 
@@ -1213,7 +1230,8 @@ class Assembler : public AssemblerBase {
 
   // Record a deoptimization reason that can be used by a log or cpu profiler.
   // Use --trace-deopt to enable.
-  void RecordDeoptReason(const int reason, int raw_position, int id);
+  void RecordDeoptReason(DeoptimizeReason reason, SourcePosition position,
+                         int id);
 
   // Writes a single byte or word of data in the code stream.  Used
   // for inline tables, e.g., jump-tables.

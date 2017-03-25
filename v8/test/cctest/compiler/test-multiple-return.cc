@@ -13,6 +13,7 @@
 #include "src/compiler.h"
 #include "src/compiler/linkage.h"
 #include "src/macro-assembler.h"
+#include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/codegen-tester.h"
 #include "test/cctest/compiler/value-helper.h"
@@ -25,24 +26,21 @@ namespace {
 
 CallDescriptor* GetCallDescriptor(Zone* zone, int return_count,
                                   int param_count) {
-  MachineSignature::Builder msig(zone, return_count, param_count);
   LocationSignature::Builder locations(zone, return_count, param_count);
   const RegisterConfiguration* config = RegisterConfiguration::Turbofan();
 
   // Add return location(s).
   CHECK(return_count <= config->num_allocatable_general_registers());
   for (int i = 0; i < return_count; i++) {
-    msig.AddReturn(MachineType::Int32());
-    locations.AddReturn(
-        LinkageLocation::ForRegister(config->allocatable_general_codes()[i]));
+    locations.AddReturn(LinkageLocation::ForRegister(
+        config->allocatable_general_codes()[i], MachineType::AnyTagged()));
   }
 
   // Add register and/or stack parameter(s).
   CHECK(param_count <= config->num_allocatable_general_registers());
   for (int i = 0; i < param_count; i++) {
-    msig.AddParam(MachineType::Int32());
-    locations.AddParam(
-        LinkageLocation::ForRegister(config->allocatable_general_codes()[i]));
+    locations.AddParam(LinkageLocation::ForRegister(
+        config->allocatable_general_codes()[i], MachineType::AnyTagged()));
   }
 
   const RegList kCalleeSaveRegisters = 0;
@@ -55,7 +53,6 @@ CallDescriptor* GetCallDescriptor(Zone* zone, int return_count,
       CallDescriptor::kCallCodeObject,    // kind
       target_type,                        // target MachineType
       target_loc,                         // target location
-      msig.Build(),                       // machine_sig
       locations.Build(),                  // location_sig
       0,                                  // js_parameter_count
       compiler::Operator::kNoProperties,  // properties
@@ -68,8 +65,8 @@ CallDescriptor* GetCallDescriptor(Zone* zone, int return_count,
 
 
 TEST(ReturnThreeValues) {
-  base::AccountingAllocator allocator;
-  Zone zone(&allocator);
+  v8::internal::AccountingAllocator allocator;
+  Zone zone(&allocator, ZONE_NAME);
   CallDescriptor* desc = GetCallDescriptor(&zone, 3, 2);
   HandleAndZoneScope handles;
   RawMachineAssembler m(handles.main_isolate(),
@@ -85,7 +82,7 @@ TEST(ReturnThreeValues) {
   m.Return(add, sub, mul);
 
   CompilationInfo info(ArrayVector("testing"), handles.main_isolate(),
-                       handles.main_zone());
+                       handles.main_zone(), Code::ComputeFlags(Code::STUB));
   Handle<Code> code =
       Pipeline::GenerateCodeForTesting(&info, desc, m.graph(), m.Export());
 #ifdef ENABLE_DISASSEMBLER

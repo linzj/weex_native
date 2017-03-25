@@ -1,6 +1,6 @@
-# Copyright 2014 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2014 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 """Contains logic to parse .isolate files.
 
@@ -8,8 +8,8 @@ This module doesn't touch the file system. It's the job of the client code to do
 I/O on behalf of this module.
 
 See more information at
-  https://code.google.com/p/swarming/wiki/IsolateDesign
-  https://code.google.com/p/swarming/wiki/IsolateUserGuide
+  https://github.com/luci/luci-py/tree/master/appengine/isolate/doc/client
+  https://github.com/luci/luci-py/blob/master/appengine/isolate/doc/Design.md#isolated-file-format
 """
 
 import ast

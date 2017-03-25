@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 // Tests of sampler functionalities.
 
-#include "src/libsampler/v8-sampler.h"
+#include "src/libsampler/sampler.h"
 
 #include "src/base/platform/platform.h"
+#include "src/base/platform/time.h"
 #include "test/cctest/cctest.h"
 
 
@@ -41,10 +42,9 @@ class TestSampler : public Sampler {
   explicit TestSampler(Isolate* isolate) : Sampler(isolate) {}
 
   void SampleStack(const v8::RegisterState& regs) override {
-    void* frames[Sampler::kMaxFramesCount];
+    void* frames[kMaxFramesCount];
     SampleInfo sample_info;
-    isolate()->GetStackSample(regs, reinterpret_cast<void**>(frames),
-                              Sampler::kMaxFramesCount, &sample_info);
+    isolate()->GetStackSample(regs, frames, kMaxFramesCount, &sample_info);
     if (is_counting_samples_) {
       if (sample_info.vm_state == JS) ++js_sample_count_;
       if (sample_info.vm_state == EXTERNAL) ++external_sample_count_;

@@ -23,18 +23,11 @@ class CpuSampler : public sampler::Sampler {
       : sampler::Sampler(reinterpret_cast<v8::Isolate*>(isolate)),
         processor_(processor) {}
 
-  void SampleStack(const v8::RegisterState& state) override {
-    v8::Isolate* v8_isolate = isolate();
-    Isolate* i_isolate = reinterpret_cast<Isolate*>(v8_isolate);
-#if defined(USE_SIMULATOR)
-    v8::RegisterState regs;
-    if (!SimulatorHelper::FillRegisters(i_isolate, &regs)) return;
-#else
-    const v8::RegisterState& regs = state;
-#endif
+  void SampleStack(const v8::RegisterState& regs) override {
     TickSample* sample = processor_->StartTickSample();
-    if (sample == NULL) return;
-    sample->Init(i_isolate, regs, TickSample::kIncludeCEntryFrame, true);
+    if (sample == nullptr) return;
+    Isolate* isolate = reinterpret_cast<Isolate*>(this->isolate());
+    sample->Init(isolate, regs, TickSample::kIncludeCEntryFrame, true);
     if (is_counting_samples_ && !sample->timestamp.IsNull()) {
       if (sample->state == JS) ++js_sample_count_;
       if (sample->state == EXTERNAL) ++external_sample_count_;
@@ -77,7 +70,7 @@ void ProfilerEventsProcessor::AddDeoptStack(Isolate* isolate, Address from,
   regs.sp = fp - fp_to_sp_delta;
   regs.fp = fp;
   regs.pc = from;
-  record.sample.Init(isolate, regs, TickSample::kSkipCEntryFrame, false);
+  record.sample.Init(isolate, regs, TickSample::kSkipCEntryFrame, false, false);
   ticks_from_vm_buffer_.Enqueue(record);
 }
 
@@ -92,7 +85,8 @@ void ProfilerEventsProcessor::AddCurrentStack(Isolate* isolate,
     regs.fp = frame->fp();
     regs.pc = frame->pc();
   }
-  record.sample.Init(isolate, regs, TickSample::kSkipCEntryFrame, update_stats);
+  record.sample.Init(isolate, regs, TickSample::kSkipCEntryFrame, update_stats,
+                     false);
   ticks_from_vm_buffer_.Enqueue(record);
 }
 
@@ -283,6 +277,21 @@ void CpuProfiler::ResetProfiles() {
   profiles_->set_cpu_profiler(this);
 }
 
+void CpuProfiler::CreateEntriesForRuntimeCallStats() {
+  static_entries_.clear();
+  RuntimeCallStats* rcs = isolate_->counters()->runtime_call_stats();
+  CodeMap* code_map = generator_->code_map();
+  for (int i = 0; i < RuntimeCallStats::counters_count; ++i) {
+    RuntimeCallCounter* counter = &(rcs->*(RuntimeCallStats::counters[i]));
+    DCHECK(counter->name());
+    std::unique_ptr<CodeEntry> entry(
+        new CodeEntry(CodeEventListener::FUNCTION_TAG, counter->name(),
+                      CodeEntry::kEmptyNamePrefix, "native V8Runtime"));
+    code_map->AddCode(reinterpret_cast<Address>(counter), entry.get(), 1);
+    static_entries_.push_back(std::move(entry));
+  }
+}
+
 void CpuProfiler::CollectSample() {
   if (processor_) {
     processor_->AddCurrentStack(isolate_);
@@ -314,6 +323,7 @@ void CpuProfiler::StartProcessorIfNotStarted() {
   generator_.reset(new ProfileGenerator(profiles_.get()));
   processor_.reset(new ProfilerEventsProcessor(isolate_, generator_.get(),
                                                sampling_interval_));
+  CreateEntriesForRuntimeCallStats();
   logger->SetUpProfilerListener();
   ProfilerListener* profiler_listener = logger->profiler_listener();
   profiler_listener->AddObserver(this);
@@ -332,32 +342,20 @@ void CpuProfiler::StartProcessorIfNotStarted() {
   processor_->StartSynchronously();
 }
 
-
 CpuProfile* CpuProfiler::StopProfiling(const char* title) {
   if (!is_profiling_) return nullptr;
   StopProcessorIfLastProfile(title);
-  CpuProfile* result = profiles_->StopProfiling(title);
-  if (result) {
-    result->Print();
-  }
-  return result;
+  return profiles_->StopProfiling(title);
 }
-
 
 CpuProfile* CpuProfiler::StopProfiling(String* title) {
-  if (!is_profiling_) return nullptr;
-  const char* profile_title = profiles_->GetName(title);
-  StopProcessorIfLastProfile(profile_title);
-  return profiles_->StopProfiling(profile_title);
+  return StopProfiling(profiles_->GetName(title));
 }
-
 
 void CpuProfiler::StopProcessorIfLastProfile(const char* title) {
-  if (profiles_->IsLastProfile(title)) {
-    StopProcessor();
-  }
+  if (!profiles_->IsLastProfile(title)) return;
+  StopProcessor();
 }
-
 
 void CpuProfiler::StopProcessor() {
   Logger* logger = isolate_->logger();

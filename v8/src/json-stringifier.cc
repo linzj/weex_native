@@ -212,23 +212,25 @@ MaybeHandle<Object> JsonStringifier::ApplyToJsonFunction(Handle<Object> object,
 }
 
 MaybeHandle<Object> JsonStringifier::ApplyReplacerFunction(
-    Handle<Object> object, Handle<Object> key) {
+    Handle<Object> value, Handle<Object> key, Handle<Object> initial_holder) {
   HandleScope scope(isolate_);
   if (key->IsSmi()) key = factory()->NumberToString(key);
-  Handle<Object> argv[] = {key, object};
-  Handle<JSReceiver> holder = CurrentHolder(object);
+  Handle<Object> argv[] = {key, value};
+  Handle<JSReceiver> holder = CurrentHolder(value, initial_holder);
   ASSIGN_RETURN_ON_EXCEPTION(
-      isolate_, object,
+      isolate_, value,
       Execution::Call(isolate_, replacer_function_, holder, 2, argv), Object);
-  return scope.CloseAndEscape(object);
+  return scope.CloseAndEscape(value);
 }
 
-Handle<JSReceiver> JsonStringifier::CurrentHolder(Handle<Object> value) {
+Handle<JSReceiver> JsonStringifier::CurrentHolder(
+    Handle<Object> value, Handle<Object> initial_holder) {
   int length = Smi::cast(stack_->length())->value();
   if (length == 0) {
     Handle<JSObject> holder =
         factory()->NewJSObject(isolate_->object_function());
-    JSObject::AddProperty(holder, factory()->empty_string(), value, NONE);
+    JSObject::AddProperty(holder, factory()->empty_string(), initial_holder,
+                          NONE);
     return holder;
   } else {
     FixedArray* elements = FixedArray::cast(stack_->elements());
@@ -273,6 +275,7 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
                                                     bool comma,
                                                     Handle<Object> key) {
   StackLimitCheck interrupt_check(isolate_);
+  Handle<Object> initial_value = object;
   if (interrupt_check.InterruptRequested() &&
       isolate_->stack_guard()->HandleInterrupts()->IsException(isolate_)) {
     return EXCEPTION;
@@ -283,7 +286,8 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
   }
   if (!replacer_function_.is_null()) {
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-        isolate_, object, ApplyReplacerFunction(object, key), EXCEPTION);
+        isolate_, object, ApplyReplacerFunction(object, key, initial_value),
+        EXCEPTION);
   }
 
   if (object->IsSmi()) {
@@ -319,7 +323,6 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
     case JS_VALUE_TYPE:
       if (deferred_string_key) SerializeDeferredKey(comma, key);
       return SerializeJSValue(Handle<JSValue>::cast(object));
-    case SIMD128_VALUE_TYPE:
     case SYMBOL_TYPE:
       return UNCHANGED;
     default:
@@ -530,7 +533,8 @@ JsonStringifier::Result JsonStringifier::SerializeJSObject(
       PropertyDetails details = map->instance_descriptors()->GetDetails(i);
       if (details.IsDontEnum()) continue;
       Handle<Object> property;
-      if (details.type() == DATA && *map == js_obj->map()) {
+      if (details.location() == kField && *map == js_obj->map()) {
+        DCHECK_EQ(kData, details.kind());
         FieldIndex field_index = FieldIndex::ForDescriptor(*map, i);
         property = JSObject::FastPropertyAt(js_obj, details.representation(),
                                             field_index);

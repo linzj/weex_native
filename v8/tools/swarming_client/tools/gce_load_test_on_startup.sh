@@ -1,7 +1,7 @@
 #!/bin/bash
-# Copyright 2014 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2014 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 # Script to be used on GCE slave startup to initiate a load test. Each VM will
 # fire an equivalent number of bots and clients. Fine tune the value depending
@@ -21,7 +21,7 @@ set -e
 SERVER=https://CHANGE-ME-TO-PROPER-VALUE.appspot.com
 
 # Source code to use.
-REPO=https://code.google.com/p/swarming.client.git
+REPO=https://github.com/luci/client-py
 
 # Once the tasks are completed, one can harvest the logs back:
 #   scp "slave:/var/log/swarming/*.*" .

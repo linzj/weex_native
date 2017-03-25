@@ -5,6 +5,7 @@
 #include "src/v8.h"
 
 #include "src/interpreter/interpreter-intrinsics.h"
+#include "src/objects-inl.h"
 #include "test/cctest/interpreter/interpreter-tester.h"
 
 namespace v8 {
@@ -26,9 +27,9 @@ class InvokeIntrinsicHelper {
   Handle<Object> Invoke(A... args) {
     CHECK(IntrinsicsHelper::IsSupported(function_id_));
     BytecodeArrayBuilder builder(isolate_, zone_, sizeof...(args), 0, 0);
-    builder.CallRuntime(function_id_, builder.Parameter(0), sizeof...(args))
-        .Return();
-    InterpreterTester tester(isolate_, builder.ToBytecodeArray());
+    RegisterList reg_list(builder.Parameter(0).index(), sizeof...(args));
+    builder.CallRuntime(function_id_, reg_list).Return();
+    InterpreterTester tester(isolate_, builder.ToBytecodeArray(isolate_));
     auto callable = tester.GetCallable<A...>();
     return callable(args...).ToHandleChecked();
   }
@@ -112,27 +113,6 @@ TEST(IsJSProxy) {
   CHECK_EQ(*factory->false_value(), *helper.Invoke(helper.NewObject("42")));
   CHECK_EQ(*factory->true_value(),
            *helper.Invoke(helper.NewObject("new Proxy({},{})")));
-}
-
-TEST(IsRegExp) {
-  HandleAndZoneScope handles;
-
-  InvokeIntrinsicHelper helper(handles.main_isolate(), handles.main_zone(),
-                               Runtime::kInlineIsRegExp);
-  Factory* factory = handles.main_isolate()->factory();
-
-  CHECK_EQ(*factory->false_value(),
-           *helper.Invoke(helper.NewObject("new Date()")));
-  CHECK_EQ(*factory->false_value(),
-           *helper.Invoke(helper.NewObject("(function() {})")));
-  CHECK_EQ(*factory->false_value(), *helper.Invoke(helper.NewObject("([1])")));
-  CHECK_EQ(*factory->false_value(), *helper.Invoke(helper.NewObject("({})")));
-  CHECK_EQ(*factory->true_value(), *helper.Invoke(helper.NewObject("(/x/)")));
-  CHECK_EQ(*factory->false_value(), *helper.Invoke(helper.Undefined()));
-  CHECK_EQ(*factory->false_value(), *helper.Invoke(helper.Null()));
-  CHECK_EQ(*factory->false_value(),
-           *helper.Invoke(helper.NewObject("'string'")));
-  CHECK_EQ(*factory->false_value(), *helper.Invoke(helper.NewObject("42")));
 }
 
 TEST(IsTypedArray) {
@@ -246,25 +226,25 @@ TEST(IntrinsicAsStubCall) {
             ->SameValue(*sub_string_helper.NewObject("'bar'")));
 }
 
-TEST(ValueOf) {
+TEST(ClassOf) {
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
   Factory* factory = isolate->factory();
   InvokeIntrinsicHelper helper(handles.main_isolate(), handles.main_zone(),
-                               Runtime::kInlineValueOf);
-
-  CHECK_EQ(Smi::FromInt(1234), *helper.Invoke(helper.NewObject("1234")));
-  CHECK_EQ(Smi::FromInt(5678),
-           *helper.Invoke(helper.NewObject("new Object(5678)")));
-
-  CHECK_EQ(*factory->true_value(), *helper.Invoke(helper.NewObject("true")));
-  CHECK_EQ(*factory->false_value(),
-           *helper.Invoke(helper.NewObject("new Object(false)")));
-
-  CHECK(helper.Invoke(helper.NewObject("'foobar'"))
-            ->SameValue(*helper.NewObject("'foobar'")));
-  CHECK(helper.Invoke(helper.NewObject("new Object('foobar')"))
-            ->SameValue(*helper.NewObject("'foobar'")));
+                               Runtime::kInlineClassOf);
+  CHECK_EQ(*helper.Invoke(helper.NewObject("123")), *factory->null_value());
+  CHECK_EQ(*helper.Invoke(helper.NewObject("'true'")), *factory->null_value());
+  CHECK_EQ(*helper.Invoke(helper.NewObject("'foo'")), *factory->null_value());
+  CHECK(helper.Invoke(helper.NewObject("({a:1})"))
+            ->SameValue(*helper.NewObject("'Object'")));
+  CHECK(helper.Invoke(helper.NewObject("(function foo() {})"))
+            ->SameValue(*helper.NewObject("'Function'")));
+  CHECK(helper.Invoke(helper.NewObject("new Date()"))
+            ->SameValue(*helper.NewObject("'Date'")));
+  CHECK(helper.Invoke(helper.NewObject("new Set"))
+            ->SameValue(*helper.NewObject("'Set'")));
+  CHECK(helper.Invoke(helper.NewObject("/x/"))
+            ->SameValue(*helper.NewObject("'RegExp'")));
 }
 
 }  // namespace interpreter

@@ -35,19 +35,17 @@ config("find_bad_constructs") {
       "-add-plugin",
       "-Xclang",
       "find-bad-constructs",
-      "-Xclang",
-      "-plugin-arg-find-bad-constructs",
-      "-Xclang",
-      "check-templates",
-      "-Xclang",
-      "-plugin-arg-find-bad-constructs",
-      "-Xclang",
-      "follow-macro-expansion",
-      "-Xclang",
-      "-plugin-arg-find-bad-constructs",
-      "-Xclang",
-      "check-implicit-copy-ctors",
     ]
+
+    # TODO(vmpstr): We need to enable this everywhere. crbug.com/554600
+    if (is_linux && !is_chromeos && !is_chromecast) {
+      cflags += [
+        "-Xclang",
+        "-plugin-arg-find-bad-constructs",
+        "-Xclang",
+        "check-auto-raw-pointer",
+      ]
+    }
 
     if ((is_linux || is_android) && !is_chromecast) {
       cflags += [
@@ -68,5 +66,7 @@ config("extra_warnings") {
 
     # Warns when a const char[] is converted to bool.
     "-Wstring-conversion",
+
+    "-Wtautological-overlap-compare",
   ]
 }

@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/compiler/opcodes.h"
-#include "src/compiler/operator.h"
-#include "src/compiler/operator-properties.h"
 #include "src/compiler/simplified-operator.h"
-#include "src/types.h"
+#include "src/compiler/opcodes.h"
+#include "src/compiler/operator-properties.h"
+#include "src/compiler/operator.h"
+#include "src/compiler/types.h"
 #include "test/unittests/test-utils.h"
 
 namespace v8 {
@@ -38,7 +38,6 @@ const PureOperator kPureOperators[] = {
         Operator::kPure | properties, input_count        \
   }
     PURE(BooleanNot, Operator::kNoProperties, 1),
-    PURE(BooleanToNumber, Operator::kNoProperties, 1),
     PURE(NumberEqual, Operator::kCommutative, 2),
     PURE(NumberLessThan, Operator::kNoProperties, 2),
     PURE(NumberLessThanOrEqual, Operator::kNoProperties, 2),
@@ -61,10 +60,11 @@ const PureOperator kPureOperators[] = {
     PURE(ChangeTaggedToFloat64, Operator::kNoProperties, 1),
     PURE(ChangeInt32ToTagged, Operator::kNoProperties, 1),
     PURE(ChangeUint32ToTagged, Operator::kNoProperties, 1),
-    PURE(ChangeFloat64ToTagged, Operator::kNoProperties, 1),
     PURE(ChangeTaggedToBit, Operator::kNoProperties, 1),
     PURE(ChangeBitToTagged, Operator::kNoProperties, 1),
     PURE(TruncateTaggedToWord32, Operator::kNoProperties, 1),
+    PURE(TruncateTaggedToFloat64, Operator::kNoProperties, 1),
+    PURE(TruncateTaggedToBit, Operator::kNoProperties, 1),
     PURE(ObjectIsNumber, Operator::kNoProperties, 1),
     PURE(ObjectIsReceiver, Operator::kNoProperties, 1),
     PURE(ObjectIsSmi, Operator::kNoProperties, 1)

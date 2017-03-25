@@ -1,6 +1,8 @@
 // Copyright 2014 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+//
+// Flags: --allow-unsafe-function-constructor
 
 
 (function testReflectConstructArity() {
@@ -12,6 +14,30 @@
   assertThrows(function() {
     new Reflect.construct(function(){}, []);
   }, TypeError);
+})();
+
+
+(function testReflectConstructArg1NonConstructor() {
+  try {
+    Reflect.construct(() => {}, []);
+  } catch (e) {
+    assertInstanceof(e, TypeError);
+    assertEquals("() => {} is not a constructor", e.message);
+    return;
+  }
+  assertUnreachable("Exception expected");
+})();
+
+
+(function testReflectConstructArg3NonConstructor() {
+  try {
+    Reflect.construct(function() {}, [], () => {});
+  } catch (e) {
+    assertInstanceof(e, TypeError);
+    assertEquals("() => {} is not a constructor", e.message);
+    return;
+  }
+  assertUnreachable("Exception expected");
 })();
 
 

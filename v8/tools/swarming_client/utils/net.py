@@ -1,12 +1,10 @@
-# Copyright 2013 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2013 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 """Classes and functions for generic network communication over HTTP."""
 
 import cookielib
-import cStringIO as StringIO
-import datetime
 import httplib
 import itertools
 import json
@@ -26,6 +24,7 @@ from third_party import requests
 from third_party.requests import adapters
 from third_party.requests import structures
 
+from utils import authenticators
 from utils import oauth
 from utils import tools
 
@@ -160,8 +159,7 @@ def url_read(url, **kwargs):
 
   Returns all data read or None if it was unable to connect or read the data.
   """
-  kwargs['stream'] = False
-  response = url_open(url, **kwargs)
+  response = url_open(url, stream=False, **kwargs)
   if not response:
     return None
   try:
@@ -187,16 +185,14 @@ def url_read_json(url, **kwargs):
 
 def url_retrieve(filepath, url, **kwargs):
   """Downloads an URL to a file. Returns True on success."""
-  response = url_open(url, **kwargs)
+  response = url_open(url, stream=False, **kwargs)
   if not response:
     return False
   try:
     with open(filepath, 'wb') as f:
-      while True:
-        buf = response.read(65536)
-        if not buf:
-          return True
+      for buf in response.iter_content(65536):
         f.write(buf)
+    return True
   except (IOError, OSError, TimeoutError):
     try:
       os.remove(filepath)
@@ -243,7 +239,10 @@ def get_http_service(urlhost, allow_cached=True):
     is_gs = GS_STORAGE_HOST_URL_RE.match(urlhost)
     conf = get_oauth_config()
     if not engine_cls.provides_auth and not is_gs and not conf.disabled:
-      authenticator = OAuthAuthenticator(urlhost, conf)
+      authenticator = (
+          authenticators.LuciContextAuthenticator()
+          if conf.use_luci_context_auth else
+          authenticators.OAuthAuthenticator(urlhost, conf))
     return HttpService(
         urlhost,
         engine=engine_cls(),
@@ -351,13 +350,13 @@ class HttpService(object):
     """
     # Use global lock to ensure two authentication flows never run in parallel.
     with _auth_lock:
-      if self.authenticator:
+      if self.authenticator and self.authenticator.supports_login:
         return self.authenticator.login(allow_user_interaction)
       return False
 
   def logout(self):
     """Purges access credentials from local cache."""
-    if self.authenticator:
+    if self.authenticator and self.authenticator.supports_login:
       self.authenticator.logout()
 
   def request(
@@ -489,7 +488,7 @@ class HttpService(object):
           logging.error(
               'Unable to authenticate to %s (%s).',
               self.urlhost, self._format_error(e))
-          if self.authenticator:
+          if self.authenticator and self.authenticator.supports_login:
             logging.error(
                 'Use auth.py to login: python auth.py login --service=%s',
                 self.urlhost)
@@ -612,70 +611,54 @@ class HttpRequest(object):
     else:
       return '%s?%s' % (self.url, urllib.urlencode(self.params))
 
-  def make_fake_response(self, content='', headers=None):
-    """Makes new fake HttpResponse to this request, useful in tests."""
-    return HttpResponse.get_fake_response(content, self.get_full_url(), headers)
-
 
 class HttpResponse(object):
   """Response from HttpService."""
 
-  def __init__(self, stream, url, headers):
-    self._stream = stream
+  def __init__(self, response, url, headers):
+    self._response = response
     self._url = url
     self._headers = get_case_insensitive_dict(headers)
-    self._read = 0
     self._timeout_exc_classes = ()
 
-  @property
-  def content_length(self):
-    """Total length to the response or None if not known in advance."""
-    length = self.get_header('Content-Length')
-    return int(length) if length is not None else None
+  def iter_content(self, chunk_size):
+    assert all(issubclass(e, Exception) for e in self._timeout_exc_classes)
+    try:
+      read = 0
+      if hasattr(self._response, 'iter_content'):
+        # request.Response.
+        for buf in self._response.iter_content(chunk_size):
+          read += len(buf)
+          yield buf
+      else:
+        # File-like object.
+        while True:
+          buf = self._response.read(chunk_size)
+          if not buf:
+            break
+          read += len(buf)
+          yield buf
+    except self._timeout_exc_classes as e:
+      logging.error('Timeout while reading from %s, read %d of %s: %s',
+          self._url, read, self.get_header('Content-Length'), e)
+      raise TimeoutError(e)
+
+  def read(self):
+    assert all(issubclass(e, Exception) for e in self._timeout_exc_classes)
+    try:
+      if hasattr(self._response, 'content'):
+        # request.Response.
+        return self._response.content
+      # File-like object.
+      return self._response.read()
+    except self._timeout_exc_classes as e:
+      logging.error('Timeout while reading from %s, expected %s bytes: %s',
+          self._url, self.get_header('Content-Length'), e)
+      raise TimeoutError(e)
 
   def get_header(self, header):
     """Returns response header (as str) or None if no such header."""
     return self._headers.get(header)
-
-  def read(self, size=None):
-    """Reads up to |size| bytes from the stream and returns them.
-
-    If |size| is None reads all available bytes.
-
-    Raises TimeoutError on read timeout.
-    """
-    assert isinstance(self._timeout_exc_classes, tuple)
-    assert all(issubclass(e, Exception) for e in self._timeout_exc_classes)
-    try:
-      # cStringIO has a bug: stream.read(None) is not the same as stream.read().
-      data = self._stream.read() if size is None else self._stream.read(size)
-      self._read += len(data)
-      return data
-    except self._timeout_exc_classes as e:
-      logging.error('Timeout while reading from %s, read %d of %s: %s',
-          self._url, self._read, self.content_length, e)
-      raise TimeoutError(e)
-
-  @classmethod
-  def get_fake_response(cls, content, url, headers=None):
-    """Returns HttpResponse with predefined content, useful in tests."""
-    headers = dict(headers or {})
-    headers['Content-Length'] = len(content)
-    return cls(StringIO.StringIO(content), url, headers)
-
-
-class Authenticator(object):
-  """Base class for objects that know how to authenticate into http services."""
-
-  def authorize(self, request):
-    """Add authentication information to the request."""
-
-  def login(self, allow_user_interaction):
-    """Run interactive authentication flow refreshing the token."""
-    raise NotImplementedError()
-
-  def logout(self):
-    """Purges access credentials from local cache."""
 
 
 class RequestsLibEngine(object):
@@ -699,7 +682,9 @@ class RequestsLibEngine(object):
     transformed to TimeoutError.
     """
     return (
-        socket.timeout, ssl.SSLError, requests.Timeout,
+        socket.timeout, ssl.SSLError,
+        requests.Timeout,
+        requests.ConnectionError,
         requests.packages.urllib3.exceptions.ProtocolError,
         requests.packages.urllib3.exceptions.TimeoutError)
 
@@ -740,11 +725,7 @@ class RequestsLibEngine(object):
           stream=request.stream,
           allow_redirects=request.follow_redirects)
       response.raise_for_status()
-      if request.stream:
-        stream = response.raw
-      else:
-        stream = StringIO.StringIO(response.content)
-      return HttpResponse(stream, request.get_full_url(), response.headers)
+      return HttpResponse(response, request.get_full_url(), response.headers)
     except requests.Timeout as e:
       raise TimeoutError(e)
     except requests.HTTPError as e:
@@ -752,52 +733,6 @@ class RequestsLibEngine(object):
           e.response.status_code, e.response.headers.get('Content-Type'), e)
     except (requests.ConnectionError, socket.timeout, ssl.SSLError) as e:
       raise ConnectionError(e)
-
-
-class OAuthAuthenticator(Authenticator):
-  """Uses OAuth Authorization header to authenticate requests."""
-
-  def __init__(self, urlhost, config):
-    super(OAuthAuthenticator, self).__init__()
-    assert isinstance(config, oauth.OAuthConfig)
-    self.urlhost = urlhost
-    self.config = config
-    self._lock = threading.Lock()
-    self._access_token = None
-
-  def authorize(self, request):
-    with self._lock:
-      # Load from cache on a first access.
-      if not self._access_token:
-        self._access_token = oauth.load_access_token(self.urlhost, self.config)
-      # Refresh if expired.
-      need_refresh = True
-      if self._access_token:
-        if self._access_token.expires_at is not None:
-          # Allow 5 min of clock skew.
-          now = datetime.datetime.utcnow() + datetime.timedelta(seconds=300)
-          need_refresh = now >= self._access_token.expires_at
-        else:
-          # Token without expiration time never expired.
-          need_refresh = False
-      if need_refresh:
-        self._access_token = oauth.create_access_token(
-            self.urlhost, self.config, False)
-      if self._access_token:
-        request.headers['Authorization'] = (
-            'Bearer %s' % self._access_token.token)
-
-  def login(self, allow_user_interaction):
-    with self._lock:
-      # Forcefully refresh the token.
-      self._access_token = oauth.create_access_token(
-          self.urlhost, self.config, allow_user_interaction)
-      return self._access_token is not None
-
-  def logout(self):
-    with self._lock:
-      self._access_token = None
-      oauth.purge_access_token(self.urlhost, self.config)
 
 
 class RetryAttempt(object):

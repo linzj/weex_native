@@ -35,6 +35,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/isolate.h"
+#include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 
 using ::v8::base::OS;
@@ -109,7 +110,8 @@ class AllowNativesSyntaxNoInlining {
 // Abort any ongoing incremental marking to make sure that all weak global
 // handle callbacks are processed.
 static void NonIncrementalGC(i::Isolate* isolate) {
-  isolate->heap()->CollectAllGarbage();
+  isolate->heap()->CollectAllGarbage(i::Heap::kFinalizeIncrementalMarkingMask,
+                                     i::GarbageCollectionReason::kTesting);
 }
 
 

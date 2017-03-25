@@ -1,43 +1,46 @@
 #!/usr/bin/env python
-# Copyright 2013 The Swarming Authors. All rights reserved.
-# Use of this source code is governed under the Apache License, Version 2.0 that
-# can be found in the LICENSE file.
+# Copyright 2013 The LUCI Authors. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
 
 """Archives a set of files or directories to an Isolate Server."""
 
-__version__ = '0.4.5'
+__version__ = '0.8.0'
 
-import base64
+import errno
 import functools
+import io
 import logging
 import optparse
 import os
 import re
 import signal
+import stat
 import sys
+import tarfile
 import tempfile
-import threading
 import time
-import types
-import urllib
-import urlparse
 import zlib
 
 from third_party import colorama
 from third_party.depot_tools import fix_encoding
 from third_party.depot_tools import subcommand
 
+from libs import arfile
 from utils import file_path
 from utils import fs
 from utils import logging_utils
 from utils import lru
 from utils import net
 from utils import on_error
+from utils import subprocess42
 from utils import threading_utils
 from utils import tools
 
 import auth
 import isolated_format
+import isolate_storage
+from isolate_storage import Item
 
 
 # Version of isolate protocol passed to the server in /handshake request.
@@ -77,15 +80,6 @@ ALREADY_COMPRESSED_TYPES = [
 ]
 
 
-# Chunk size to use when reading from network stream.
-NET_IO_FILE_CHUNK = 16 * 1024
-
-
-# Read timeout in seconds for downloads from isolate storage. If there's no
-# response from the server within this timeout whole download will be aborted.
-DOWNLOAD_READ_TIMEOUT = 60
-
-
 # The delay (in seconds) to wait between logging statements when retrieving
 # the required files. This is intended to let the user (or buildbot) know that
 # the program is still running.
@@ -100,18 +94,8 @@ DEFAULT_BLACKLIST = (
 )
 
 
-# A class to use to communicate with the server by default. Can be changed by
-# 'set_storage_api_class'. Default is IsolateServer.
-_storage_api_cls = None
-
-
 class Error(Exception):
   """Generic runtime error."""
-  pass
-
-
-class IsolatedErrorNoCommand(isolated_format.IsolatedError):
-  """Signals an early abort due to lack of command specified."""
   pass
 
 
@@ -120,13 +104,8 @@ class Aborted(Error):
   pass
 
 
-def stream_read(stream, chunk_size):
-  """Reads chunks from |stream| and yields them."""
-  while True:
-    data = stream.read(chunk_size)
-    if not data:
-      break
-    yield data
+class AlreadyExists(Error):
+  """File already exists."""
 
 
 def file_read(path, chunk_size=isolated_format.DISK_FILE_CHUNK, offset=0):
@@ -150,15 +129,132 @@ def file_write(path, content_generator):
 
   Meant to be mocked out in unit tests.
   """
-  filedir = os.path.dirname(path)
-  if not fs.isdir(filedir):
-    fs.makedirs(filedir)
+  file_path.ensure_tree(os.path.dirname(path))
   total = 0
   with fs.open(path, 'wb') as f:
     for d in content_generator:
       total += len(d)
       f.write(d)
   return total
+
+
+def fileobj_path(fileobj):
+  """Return file system path for file like object or None.
+
+  The returned path is guaranteed to exist and can be passed to file system
+  operations like copy.
+  """
+  name = getattr(fileobj, 'name', None)
+  if name is None:
+    return
+
+  # If the file like object was created using something like open("test.txt")
+  # name will end up being a str (such as a function outside our control, like
+  # the standard library). We want all our paths to be unicode objects, so we
+  # decode it.
+  if not isinstance(name, unicode):
+    name = name.decode(sys.getfilesystemencoding())
+
+  # fs.exists requires an absolute path, otherwise it will fail with an
+  # assertion error.
+  if not os.path.isabs(name):
+      return
+
+  if fs.exists(name):
+    return name
+
+
+# TODO(tansell): Replace fileobj_copy with shutil.copyfileobj once proper file
+# wrappers have been created.
+def fileobj_copy(
+    dstfileobj, srcfileobj, size=-1,
+    chunk_size=isolated_format.DISK_FILE_CHUNK):
+  """Copy data from srcfileobj to dstfileobj.
+
+  Providing size means exactly that amount of data will be copied (if there
+  isn't enough data, an IOError exception is thrown). Otherwise all data until
+  the EOF marker will be copied.
+  """
+  if size == -1 and hasattr(srcfileobj, 'tell'):
+    if srcfileobj.tell() != 0:
+      raise IOError('partial file but not using size')
+
+  written = 0
+  while written != size:
+    readsize = chunk_size
+    if size > 0:
+      readsize = min(readsize, size-written)
+    data = srcfileobj.read(readsize)
+    if not data:
+      if size == -1:
+        break
+      raise IOError('partial file, got %s, wanted %s' % (written, size))
+    dstfileobj.write(data)
+    written += len(data)
+
+
+def putfile(srcfileobj, dstpath, file_mode=None, size=-1, use_symlink=False):
+  """Put srcfileobj at the given dstpath with given mode.
+
+  The function aims to do this as efficiently as possible while still allowing
+  any possible file like object be given.
+
+  Creating a tree of hardlinks has a few drawbacks:
+  - tmpfs cannot be used for the scratch space. The tree has to be on the same
+    partition as the cache.
+  - involves a write to the inode, which advances ctime, cause a metadata
+    writeback (causing disk seeking).
+  - cache ctime cannot be used to detect modifications / corruption.
+  - Some file systems (NTFS) have a 64k limit on the number of hardlink per
+    partition. This is why the function automatically fallbacks to copying the
+    file content.
+  - /proc/sys/fs/protected_hardlinks causes an additional check to ensure the
+    same owner is for all hardlinks.
+  - Anecdotal report that ext2 is known to be potentially faulty on high rate
+    of hardlink creation.
+
+  Creating a tree of symlinks has a few drawbacks:
+  - Tasks running the equivalent of os.path.realpath() will get the naked path
+    and may fail.
+  - Windows:
+    - Symlinks are reparse points:
+      https://msdn.microsoft.com/library/windows/desktop/aa365460.aspx
+      https://msdn.microsoft.com/library/windows/desktop/aa363940.aspx
+    - Symbolic links are Win32 paths, not NT paths.
+      https://googleprojectzero.blogspot.com/2016/02/the-definitive-guide-on-win32-to-nt.html
+    - Symbolic links are supported on Windows 7 and later only.
+    - SeCreateSymbolicLinkPrivilege is needed, which is not present by
+      default.
+    - SeCreateSymbolicLinkPrivilege is *stripped off* by UAC when a restricted
+      RID is present in the token;
+      https://msdn.microsoft.com/en-us/library/bb530410.aspx
+  """
+  srcpath = fileobj_path(srcfileobj)
+  if srcpath and size == -1:
+    readonly = file_mode is None or (
+        file_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+    if readonly:
+      # If the file is read only we can link the file
+      if use_symlink:
+        link_mode = file_path.SYMLINK_WITH_FALLBACK
+      else:
+        link_mode = file_path.HARDLINK_WITH_FALLBACK
+    else:
+      # If not read only, we must copy the file
+      link_mode = file_path.COPY
+
+    file_path.link_file(dstpath, srcpath, link_mode)
+  else:
+    # Need to write out the file
+    with fs.open(dstpath, 'wb') as dstfileobj:
+      fileobj_copy(dstfileobj, srcfileobj, size)
+
+  assert fs.exists(dstpath)
+
+  # file_mode of 0 is actually valid, so need explicit check.
+  if file_mode is not None:
+    fs.chmod(dstpath, file_mode)
 
 
 def zip_compress(content_generator, level=7):
@@ -223,7 +319,9 @@ def create_directories(base_directory, files):
       item = os.path.dirname(item)
   for d in sorted(directories):
     if d:
-      fs.mkdir(os.path.join(base_directory, d))
+      abs_d = os.path.join(base_directory, d)
+      if not fs.isdir(abs_d):
+        fs.mkdir(abs_d)
 
 
 def create_symlinks(base_directory, files):
@@ -236,65 +334,34 @@ def create_symlinks(base_directory, files):
       logging.warning('Ignoring symlink %s', filepath)
       continue
     outfile = os.path.join(base_directory, filepath)
-    # os.symlink() doesn't exist on Windows.
-    os.symlink(properties['l'], outfile)  # pylint: disable=E1101
+    try:
+      os.symlink(properties['l'], outfile)  # pylint: disable=E1101
+    except OSError as e:
+      if e.errno == errno.EEXIST:
+        raise AlreadyExists('File %s already exists.' % outfile)
+      raise
 
 
 def is_valid_file(path, size):
   """Determines if the given files appears valid.
 
-  Currently it just checks the file's size.
+  Currently it just checks the file exists and its size matches the expectation.
   """
   if size == UNKNOWN_FILE_SIZE:
     return fs.isfile(path)
-  actual_size = fs.stat(path).st_size
+  try:
+    actual_size = fs.stat(path).st_size
+  except OSError as e:
+    logging.warning(
+        'Can\'t read item %s, assuming it\'s invalid: %s',
+        os.path.basename(path), e)
+    return False
   if size != actual_size:
     logging.warning(
         'Found invalid item %s; %d != %d',
         os.path.basename(path), actual_size, size)
     return False
   return True
-
-
-class Item(object):
-  """An item to push to Storage.
-
-  Its digest and size may be provided in advance, if known. Otherwise they will
-  be derived from content(). If digest is provided, it MUST correspond to
-  hash algorithm used by Storage.
-
-  When used with Storage, Item starts its life in a main thread, travels
-  to 'contains' thread, then to 'push' thread and then finally back to
-  the main thread. It is never used concurrently from multiple threads.
-  """
-
-  def __init__(self, digest=None, size=None, high_priority=False):
-    self.digest = digest
-    self.size = size
-    self.high_priority = high_priority
-    self.compression_level = 6
-
-  def content(self):
-    """Iterable with content of this item as byte string (str) chunks."""
-    raise NotImplementedError()
-
-  def prepare(self, hash_algo):
-    """Ensures self.digest and self.size are set.
-
-    Uses content() as a source of data to calculate them. Does nothing if digest
-    and size is already known.
-
-    Arguments:
-      hash_algo: hash algorithm to use to calculate digest.
-    """
-    if self.digest is None or self.size is None:
-      digest = hash_algo()
-      total = 0
-      for chunk in self.content():
-        digest.update(chunk)
-        total += len(chunk)
-      self.digest = digest.hexdigest()
-      self.size = total
 
 
 class FileItem(Item):
@@ -817,392 +884,13 @@ class FetchStreamVerifier(object):
           self.expected_size, self.current_size))
 
 
-class StorageApi(object):
-  """Interface for classes that implement low-level storage operations.
+class CacheMiss(Exception):
+  """Raised when an item is not in cache."""
 
-  StorageApi is oblivious of compression and hashing scheme used. This details
-  are handled in higher level Storage class.
-
-  Clients should generally not use StorageApi directly. Storage class is
-  preferred since it implements compression and upload optimizations.
-  """
-
-  @property
-  def location(self):
-    """URL of the backing store that this class is using."""
-    raise NotImplementedError()
-
-  @property
-  def namespace(self):
-    """Isolate namespace used by this storage.
-
-    Indirectly defines hashing scheme and compression method used.
-    """
-    raise NotImplementedError()
-
-  def fetch(self, digest, offset=0):
-    """Fetches an object and yields its content.
-
-    Arguments:
-      digest: hash digest of item to download.
-      offset: offset (in bytes) from the start of the file to resume fetch from.
-
-    Yields:
-      Chunks of downloaded item (as str objects).
-    """
-    raise NotImplementedError()
-
-  def push(self, item, push_state, content=None):
-    """Uploads an |item| with content generated by |content| generator.
-
-    |item| MUST go through 'contains' call to get |push_state| before it can
-    be pushed to the storage.
-
-    To be clear, here is one possible usage:
-      all_items = [... all items to push as Item subclasses ...]
-      for missing_item, push_state in storage_api.contains(all_items).items():
-        storage_api.push(missing_item, push_state)
-
-    When pushing to a namespace with compression, data that should be pushed
-    and data provided by the item is not the same. In that case |content| is
-    not None and it yields chunks of compressed data (using item.content() as
-    a source of original uncompressed data). This is implemented by Storage
-    class.
-
-    Arguments:
-      item: Item object that holds information about an item being pushed.
-      push_state: push state object as returned by 'contains' call.
-      content: a generator that yields chunks to push, item.content() if None.
-
-    Returns:
-      None.
-    """
-    raise NotImplementedError()
-
-  def contains(self, items):
-    """Checks for |items| on the server, prepares missing ones for upload.
-
-    Arguments:
-      items: list of Item objects to check for presence.
-
-    Returns:
-      A dict missing Item -> opaque push state object to be passed to 'push'.
-      See doc string for 'push'.
-    """
-    raise NotImplementedError()
-
-
-class _IsolateServerPushState(object):
-  """Per-item state passed from IsolateServer.contains to IsolateServer.push.
-
-  Note this needs to be a global class to support pickling.
-  """
-
-  def __init__(self, preupload_status, size):
-    self.preupload_status = preupload_status
-    gs_upload_url = preupload_status.get('gs_upload_url') or None
-    if gs_upload_url:
-      self.upload_url = gs_upload_url
-      self.finalize_url = '_ah/api/isolateservice/v1/finalize_gs_upload'
-    else:
-      self.upload_url = '_ah/api/isolateservice/v1/store_inline'
-      self.finalize_url = None
-    self.uploaded = False
-    self.finalized = False
-    self.size = size
-
-
-class IsolateServer(StorageApi):
-  """StorageApi implementation that downloads and uploads to Isolate Server.
-
-  It uploads and downloads directly from Google Storage whenever appropriate.
-  Works only within single namespace.
-  """
-
-  def __init__(self, base_url, namespace):
-    super(IsolateServer, self).__init__()
-    assert file_path.is_url(base_url), base_url
-    self._base_url = base_url.rstrip('/')
-    self._namespace = namespace
-    self._namespace_dict = {
-        'compression': 'flate' if namespace.endswith(
-            ('-gzip', '-flate')) else '',
-        'digest_hash': 'sha-1',
-        'namespace': namespace,
-    }
-    self._lock = threading.Lock()
-    self._server_caps = None
-    self._memory_use = 0
-
-  @property
-  def _server_capabilities(self):
-    """Gets server details.
-
-    Returns:
-      Server capabilities dictionary as returned by /server_details endpoint.
-    """
-    # TODO(maruel): Make this request much earlier asynchronously while the
-    # files are being enumerated.
-
-    # TODO(vadimsh): Put |namespace| in the URL so that server can apply
-    # namespace-level ACLs to this call.
-
-    with self._lock:
-      if self._server_caps is None:
-        self._server_caps = net.url_read_json(
-            url='%s/_ah/api/isolateservice/v1/server_details' % self._base_url,
-            data={})
-      return self._server_caps
-
-  @property
-  def location(self):
-    return self._base_url
-
-  @property
-  def namespace(self):
-    return self._namespace
-
-  def fetch(self, digest, offset=0):
-    assert offset >= 0
-    source_url = '%s/_ah/api/isolateservice/v1/retrieve' % (
-        self._base_url)
-    logging.debug('download_file(%s, %d)', source_url, offset)
-    response = self.do_fetch(source_url, digest, offset)
-
-    if not response:
-      raise IOError(
-          'Attempted to fetch from %s; no data exist: %s / %s.' % (
-            source_url, self._namespace, digest))
-
-    # for DB uploads
-    content = response.get('content')
-    if content is not None:
-      return base64.b64decode(content)
-
-    # for GS entities
-    connection = net.url_open(response['url'])
-    if not connection:
-      raise IOError('Failed to download %s / %s' % (self._namespace, digest))
-
-    # If |offset|, verify server respects it by checking Content-Range.
-    if offset:
-      content_range = connection.get_header('Content-Range')
-      if not content_range:
-        raise IOError('Missing Content-Range header')
-
-      # 'Content-Range' format is 'bytes <offset>-<last_byte_index>/<size>'.
-      # According to a spec, <size> can be '*' meaning "Total size of the file
-      # is not known in advance".
-      try:
-        match = re.match(r'bytes (\d+)-(\d+)/(\d+|\*)', content_range)
-        if not match:
-          raise ValueError()
-        content_offset = int(match.group(1))
-        last_byte_index = int(match.group(2))
-        size = None if match.group(3) == '*' else int(match.group(3))
-      except ValueError:
-        raise IOError('Invalid Content-Range header: %s' % content_range)
-
-      # Ensure returned offset equals requested one.
-      if offset != content_offset:
-        raise IOError('Expecting offset %d, got %d (Content-Range is %s)' % (
-            offset, content_offset, content_range))
-
-      # Ensure entire tail of the file is returned.
-      if size is not None and last_byte_index + 1 != size:
-        raise IOError('Incomplete response. Content-Range: %s' % content_range)
-
-    return stream_read(connection, NET_IO_FILE_CHUNK)
-
-  def push(self, item, push_state, content=None):
-    assert isinstance(item, Item)
-    assert item.digest is not None
-    assert item.size is not None
-    assert isinstance(push_state, _IsolateServerPushState)
-    assert not push_state.finalized
-
-    # Default to item.content().
-    content = item.content() if content is None else content
-    logging.info('Push state size: %d', push_state.size)
-    if isinstance(content, (basestring, list)):
-      # Memory is already used, too late.
-      with self._lock:
-        self._memory_use += push_state.size
-    else:
-      # TODO(vadimsh): Do not read from |content| generator when retrying push.
-      # If |content| is indeed a generator, it can not be re-winded back to the
-      # beginning of the stream. A retry will find it exhausted. A possible
-      # solution is to wrap |content| generator with some sort of caching
-      # restartable generator. It should be done alongside streaming support
-      # implementation.
-      #
-      # In theory, we should keep the generator, so that it is not serialized in
-      # memory. Sadly net.HttpService.request() requires the body to be
-      # serialized.
-      assert isinstance(content, types.GeneratorType), repr(content)
-      slept = False
-      # HACK HACK HACK. Please forgive me for my sins but OMG, it works!
-      # One byte less than 512mb. This is to cope with incompressible content.
-      max_size = int(sys.maxsize * 0.25)
-      while True:
-        with self._lock:
-          # This is due to 32 bits python when uploading very large files. The
-          # problem is that it's comparing uncompressed sizes, while we care
-          # about compressed sizes since it's what is serialized in memory.
-          # The first check assumes large files are compressible and that by
-          # throttling one upload at once, we can survive. Otherwise, kaboom.
-          memory_use = self._memory_use
-          if ((push_state.size >= max_size and not memory_use) or
-              (memory_use + push_state.size <= max_size)):
-            self._memory_use += push_state.size
-            memory_use = self._memory_use
-            break
-        time.sleep(0.1)
-        slept = True
-      if slept:
-        logging.info('Unblocked: %d %d', memory_use, push_state.size)
-
-    try:
-      # This push operation may be a retry after failed finalization call below,
-      # no need to reupload contents in that case.
-      if not push_state.uploaded:
-        # PUT file to |upload_url|.
-        success = self.do_push(push_state, content)
-        if not success:
-          raise IOError('Failed to upload file with hash %s to URL %s' % (
-              item.digest, push_state.upload_url))
-        push_state.uploaded = True
-      else:
-        logging.info(
-            'A file %s already uploaded, retrying finalization only',
-            item.digest)
-
-      # Optionally notify the server that it's done.
-      if push_state.finalize_url:
-        # TODO(vadimsh): Calculate MD5 or CRC32C sum while uploading a file and
-        # send it to isolated server. That way isolate server can verify that
-        # the data safely reached Google Storage (GS provides MD5 and CRC32C of
-        # stored files).
-        # TODO(maruel): Fix the server to accept properly data={} so
-        # url_read_json() can be used.
-        response = net.url_read_json(
-            url='%s/%s' % (self._base_url, push_state.finalize_url),
-            data={
-                'upload_ticket': push_state.preupload_status['upload_ticket'],
-            })
-        if not response or not response['ok']:
-          raise IOError('Failed to finalize file with hash %s.' % item.digest)
-      push_state.finalized = True
-    finally:
-      with self._lock:
-        self._memory_use -= push_state.size
-
-  def contains(self, items):
-    # Ensure all items were initialized with 'prepare' call. Storage does that.
-    assert all(i.digest is not None and i.size is not None for i in items)
-
-    # Request body is a json encoded list of dicts.
-    body = {
-        'items': [
-          {
-            'digest': item.digest,
-            'is_isolated': bool(item.high_priority),
-            'size': item.size,
-          } for item in items
-        ],
-        'namespace': self._namespace_dict,
-    }
-
-    query_url = '%s/_ah/api/isolateservice/v1/preupload' % self._base_url
-
-    # Response body is a list of push_urls (or null if file is already present).
-    response = None
-    try:
-      response = net.url_read_json(url=query_url, data=body)
-      if response is None:
-        raise isolated_format.MappingError(
-            'Failed to execute preupload query')
-    except ValueError as err:
-      raise isolated_format.MappingError(
-          'Invalid response from server: %s, body is %s' % (err, response))
-
-    # Pick Items that are missing, attach _PushState to them.
-    missing_items = {}
-    for preupload_status in response.get('items', []):
-      assert 'upload_ticket' in preupload_status, (
-          preupload_status, '/preupload did not generate an upload ticket')
-      index = int(preupload_status['index'])
-      missing_items[items[index]] = _IsolateServerPushState(
-          preupload_status, items[index].size)
-    logging.info('Queried %d files, %d cache hit',
-        len(items), len(items) - len(missing_items))
-    return missing_items
-
-  def do_fetch(self, url, digest, offset):
-    """Fetches isolated data from the URL.
-
-    Used only for fetching files, not for API calls. Can be overridden in
-    subclasses.
-
-    Args:
-      url: URL to fetch the data from, can possibly return http redirect.
-      offset: byte offset inside the file to start fetching from.
-
-    Returns:
-      net.HttpResponse compatible object, with 'read' and 'get_header' calls.
-    """
-    assert isinstance(offset, int)
-    data = {
-        'digest': digest.encode('utf-8'),
-        'namespace': self._namespace_dict,
-        'offset': offset,
-    }
-    # TODO(maruel): url + '?' + urllib.urlencode(data) once a HTTP GET endpoint
-    # is added.
-    return net.url_read_json(
-        url=url,
-        data=data,
-        read_timeout=DOWNLOAD_READ_TIMEOUT)
-
-  def do_push(self, push_state, content):
-    """Uploads isolated file to the URL.
-
-    Used only for storing files, not for API calls. Can be overridden in
-    subclasses.
-
-    Args:
-      url: URL to upload the data to.
-      push_state: an _IsolateServicePushState instance
-      item: the original Item to be uploaded
-      content: an iterable that yields 'str' chunks.
-    """
-    # A cheezy way to avoid memcpy of (possibly huge) file, until streaming
-    # upload support is implemented.
-    if isinstance(content, list) and len(content) == 1:
-      content = content[0]
-    else:
-      content = ''.join(content)
-
-    # DB upload
-    if not push_state.finalize_url:
-      url = '%s/%s' % (self._base_url, push_state.upload_url)
-      content = base64.b64encode(content)
-      data = {
-          'upload_ticket': push_state.preupload_status['upload_ticket'],
-          'content': content,
-      }
-      response = net.url_read_json(url=url, data=data)
-      return response is not None and response['ok']
-
-    # upload to GS
-    url = push_state.upload_url
-    response = net.url_read(
-        content_type='application/octet-stream',
-        data=content,
-        method='PUT',
-        headers={'Cache-Control': 'public, max-age=31536000'},
-        url=url)
-    return response is not None
+  def __init__(self, digest):
+    self.digest = digest
+    super(CacheMiss, self).__init__(
+        'Item with digest %r is not found in cache' % digest)
 
 
 class LocalCache(object):
@@ -1213,6 +901,18 @@ class LocalCache(object):
   """
   cache_dir = None
 
+  def __init__(self):
+    self._lock = threading_utils.LockWithAssert()
+    # Profiling values.
+    self._added = []
+    self._initial_number_items = 0
+    self._initial_size = 0
+    self._evicted = []
+    self._used = []
+
+  def __contains__(self, digest):
+    raise NotImplementedError()
+
   def __enter__(self):
     """Context manager interface."""
     return self
@@ -1221,8 +921,32 @@ class LocalCache(object):
     """Context manager interface."""
     return False
 
+  @property
+  def added(self):
+    return self._added[:]
+
+  @property
+  def evicted(self):
+    return self._evicted[:]
+
+  @property
+  def used(self):
+    return self._used[:]
+
+  @property
+  def initial_number_items(self):
+    return self._initial_number_items
+
+  @property
+  def initial_size(self):
+    return self._initial_size
+
   def cached_set(self):
     """Returns a set of all cached digests (always a new object)."""
+    raise NotImplementedError()
+
+  def cleanup(self):
+    """Deletes any corrupted item from the cache and trims it if necessary."""
     raise NotImplementedError()
 
   def touch(self, digest, size):
@@ -1241,19 +965,18 @@ class LocalCache(object):
     """Removes item from cache if it's there."""
     raise NotImplementedError()
 
-  def read(self, digest):
-    """Returns contents of the cached item as a single str."""
+  def getfileobj(self, digest):
+    """Returns a readable file like object.
+
+    If file exists on the file system it will have a .name attribute with an
+    absolute path to the file.
+    """
     raise NotImplementedError()
 
   def write(self, digest, content):
-    """Reads data from |content| generator and stores it in cache."""
-    raise NotImplementedError()
+    """Reads data from |content| generator and stores it in cache.
 
-  def hardlink(self, digest, dest, file_mode):
-    """Ensures file at |dest| has same content as cached |digest|.
-
-    If file_mode is provided, it is used to set the executable bit if
-    applicable.
+    Returns digest to simplify chaining.
     """
     raise NotImplementedError()
 
@@ -1268,13 +991,18 @@ class MemoryCache(LocalCache):
     """
     super(MemoryCache, self).__init__()
     self._file_mode_mask = file_mode_mask
-    # Let's not assume dict is thread safe.
-    self._lock = threading.Lock()
     self._contents = {}
+
+  def __contains__(self, digest):
+    with self._lock:
+      return digest in self._contents
 
   def cached_set(self):
     with self._lock:
       return set(self._contents)
+
+  def cleanup(self):
+    pass
 
   def touch(self, digest, size):
     with self._lock:
@@ -1282,23 +1010,26 @@ class MemoryCache(LocalCache):
 
   def evict(self, digest):
     with self._lock:
-      self._contents.pop(digest, None)
+      v = self._contents.pop(digest, None)
+      if v is not None:
+        self._evicted.add(v)
 
-  def read(self, digest):
+  def getfileobj(self, digest):
     with self._lock:
-      return self._contents[digest]
+      try:
+        d = self._contents[digest]
+      except KeyError:
+        raise CacheMiss(digest)
+      self._used.append(len(d))
+    return io.BytesIO(d)
 
   def write(self, digest, content):
     # Assemble whole stream before taking the lock.
     data = ''.join(content)
     with self._lock:
       self._contents[digest] = data
-
-  def hardlink(self, digest, dest, file_mode):
-    """Since data is kept in memory, there is no filenode to hardlink."""
-    file_write(dest, [self.read(digest)])
-    if file_mode is not None:
-      fs.chmod(dest, file_mode & self._file_mode_mask)
+      self._added.append(len(data))
+    return digest
 
 
 class CachePolicies(object):
@@ -1324,32 +1055,41 @@ class DiskCache(LocalCache):
   """
   STATE_FILE = u'state.json'
 
-  def __init__(self, cache_dir, policies, hash_algo):
+  def __init__(self, cache_dir, policies, hash_algo, trim=True):
     """
     Arguments:
       cache_dir: directory where to place the cache.
       policies: cache retention policies.
       algo: hashing algorithm used.
+      trim: if True to enforce |policies| right away.
+        It can be done later by calling trim() explicitly.
     """
+    # All protected methods (starting with '_') except _path should be called
+    # with self._lock held.
     super(DiskCache, self).__init__()
     self.cache_dir = cache_dir
     self.policies = policies
     self.hash_algo = hash_algo
     self.state_file = os.path.join(cache_dir, self.STATE_FILE)
-
-    # All protected methods (starting with '_') except _path should be called
-    # with this lock locked.
-    self._lock = threading_utils.LockWithAssert()
+    # Items in a LRU lookup dict(digest: size).
     self._lru = lru.LRUDict()
-
-    # Profiling values.
-    self._added = []
-    self._removed = []
-    self._free_disk = 0
-
+    # Current cached free disk space. It is updated by self._trim().
+    file_path.ensure_tree(self.cache_dir)
+    self._free_disk = file_path.get_free_space(self.cache_dir)
+    # The first item in the LRU cache that must not be evicted during this run
+    # since it was referenced. All items more recent that _protected in the LRU
+    # cache are also inherently protected. It could be a set() of all items
+    # referenced but this increases memory usage without a use case.
+    self._protected = None
+    # Cleanup operations done by self._load(), if any.
+    self._operations = []
     with tools.Profiler('Setup'):
       with self._lock:
-        self._load()
+        self._load(trim=trim)
+
+  def __contains__(self, digest):
+    with self._lock:
+      return digest in self._lru
 
   def __enter__(self):
     return self
@@ -1367,8 +1107,8 @@ class DiskCache(LocalCache):
             len(self._lru),
             sum(self._lru.itervalues()) / 1024)
         logging.info(
-            '%5d (%8dkb) removed',
-            len(self._removed), sum(self._removed) / 1024)
+            '%5d (%8dkb) evicted',
+            len(self._evicted), sum(self._evicted) / 1024)
         logging.info(
             '       %8dkb free',
             self._free_disk / 1024)
@@ -1378,8 +1118,65 @@ class DiskCache(LocalCache):
     with self._lock:
       return self._lru.keys_set()
 
+  def cleanup(self):
+    """Cleans up the cache directory.
+
+    Ensures there is no unknown files in cache_dir.
+    Ensures the read-only bits are set correctly.
+
+    At that point, the cache was already loaded, trimmed to respect cache
+    policies.
+    """
+    fs.chmod(self.cache_dir, 0700)
+    # Ensure that all files listed in the state still exist and add new ones.
+    previous = self._lru.keys_set()
+    # It'd be faster if there were a readdir() function.
+    for filename in fs.listdir(self.cache_dir):
+      if filename == self.STATE_FILE:
+        fs.chmod(os.path.join(self.cache_dir, filename), 0600)
+        continue
+      if filename in previous:
+        fs.chmod(os.path.join(self.cache_dir, filename), 0400)
+        previous.remove(filename)
+        continue
+
+      # An untracked file. Delete it.
+      logging.warning('Removing unknown file %s from cache', filename)
+      p = self._path(filename)
+      if fs.isdir(p):
+        try:
+          file_path.rmtree(p)
+        except OSError:
+          pass
+      else:
+        file_path.try_remove(p)
+      continue
+
+    if previous:
+      # Filter out entries that were not found.
+      logging.warning('Removed %d lost files', len(previous))
+      for filename in previous:
+        self._lru.pop(filename)
+
+    # What remains to be done is to hash every single item to
+    # detect corruption, then save to ensure state.json is up to date.
+    # Sadly, on a 50Gb cache with 100mib/s I/O, this is still over 8 minutes.
+    # TODO(maruel): Let's revisit once directory metadata is stored in
+    # state.json so only the files that had been mapped since the last cleanup()
+    # call are manually verified.
+    #
+    #with self._lock:
+    #  for digest in self._lru:
+    #    if not isolated_format.is_valid_hash(
+    #        self._path(digest), self.hash_algo):
+    #      self.evict(digest)
+    #      logging.info('Deleted corrupted item: %s', digest)
+
   def touch(self, digest, size):
-    """Verifies an actual file is valid.
+    """Verifies an actual file is valid and bumps its LRU position.
+
+    Returns False if the file is missing or invalid. Doesn't kick it from LRU
+    though (call 'evict' explicitly).
 
     Note that is doesn't compute the hash so it could still be corrupted if the
     file size didn't change.
@@ -1395,19 +1192,29 @@ class DiskCache(LocalCache):
       if digest not in self._lru:
         return False
       self._lru.touch(digest)
+      self._protected = self._protected or digest
     return True
 
   def evict(self, digest):
     with self._lock:
+      # Do not check for 'digest == self._protected' since it could be because
+      # the object is corrupted.
       self._lru.pop(digest)
       self._delete_file(digest, UNKNOWN_FILE_SIZE)
 
-  def read(self, digest):
-    with fs.open(self._path(digest), 'rb') as f:
-      return f.read()
+  def getfileobj(self, digest):
+    try:
+      f = fs.open(self._path(digest), 'rb')
+      with self._lock:
+        self._used.append(self._lru[digest])
+      return f
+    except IOError:
+      raise CacheMiss(digest)
 
   def write(self, digest, content):
     assert content is not None
+    with self._lock:
+      self._protected = self._protected or digest
     path = self._path(digest)
     # A stale broken file may remain. It is possible for the file to have write
     # access bit removed which would cause the file_write() call to fail to open
@@ -1429,82 +1236,55 @@ class DiskCache(LocalCache):
     file_path.set_read_only(path, True)
     with self._lock:
       self._add(digest, size)
+    return digest
 
-  def hardlink(self, digest, dest, file_mode):
-    """Hardlinks the file to |dest|.
+  def get_oldest(self):
+    """Returns digest of the LRU item or None."""
+    try:
+      return self._lru.get_oldest()[0]
+    except KeyError:
+      return None
 
-    Note that the file permission bits are on the file node, not the directory
-    entry, so changing the access bit on any of the directory entries for the
-    file node will affect them all.
+  def get_timestamp(self, digest):
+    """Returns timestamp of last use of an item.
+
+    Raises KeyError if item is not found.
     """
-    path = self._path(digest)
-    if not file_path.link_file(dest, path, file_path.HARDLINK_WITH_FALLBACK):
-      # Report to the server that it failed with more details. We'll want to
-      # squash them all.
-      on_error.report('Failed to hardlink\n%s -> %s' % (path, dest))
+    return self._lru.get_timestamp(digest)
 
-    if file_mode is not None:
-      # Ignores all other bits.
-      fs.chmod(dest, file_mode & 0500)
+  def trim(self):
+    """Forces retention policies."""
+    with self._lock:
+      self._trim()
 
-  def _load(self):
-    """Loads state of the cache from json file."""
+  def _load(self, trim):
+    """Loads state of the cache from json file.
+
+    If cache_dir does not exist on disk, it is created.
+    """
     self._lock.assert_locked()
 
-    if not os.path.isdir(self.cache_dir):
-      fs.makedirs(self.cache_dir)
+    if not fs.isfile(self.state_file):
+      if not os.path.isdir(self.cache_dir):
+        fs.makedirs(self.cache_dir)
     else:
-      # Make sure the cache is read-only.
-      # TODO(maruel): Calculate the cost and optimize the performance
-      # accordingly.
-      file_path.make_tree_read_only(self.cache_dir)
-
-    # Load state of the cache.
-    if fs.isfile(self.state_file):
+      # Load state of the cache.
       try:
         self._lru = lru.LRUDict.load(self.state_file)
       except ValueError as err:
         logging.error('Failed to load cache state: %s' % (err,))
         # Don't want to keep broken state file.
         file_path.try_remove(self.state_file)
-
-    # Ensure that all files listed in the state still exist and add new ones.
-    previous = self._lru.keys_set()
-    unknown = []
-    for filename in fs.listdir(self.cache_dir):
-      if filename == self.STATE_FILE:
-        continue
-      if filename in previous:
-        previous.remove(filename)
-        continue
-      # An untracked file.
-      if not isolated_format.is_valid_hash(filename, self.hash_algo):
-        logging.warning('Removing unknown file %s from cache', filename)
-        p = self._path(filename)
-        if fs.isdir(p):
-          try:
-            file_path.rmtree(p)
-          except OSError:
-            pass
-        else:
-          file_path.try_remove(p)
-        continue
-      # File that's not referenced in 'state.json'.
-      # TODO(vadimsh): Verify its SHA1 matches file name.
-      logging.warning('Adding unknown file %s to cache', filename)
-      unknown.append(filename)
-
-    if unknown:
-      # Add as oldest files. They will be deleted eventually if not accessed.
-      self._add_oldest_list(unknown)
-      logging.warning('Added back %d unknown files', len(unknown))
-
-    if previous:
-      # Filter out entries that were not found.
-      logging.warning('Removed %d lost files', len(previous))
-      for filename in previous:
-        self._lru.pop(filename)
-    self._trim()
+    if trim:
+      self._trim()
+    # We want the initial cache size after trimming, i.e. what is readily
+    # avaiable.
+    self._initial_number_items = len(self._lru)
+    self._initial_size = sum(self._lru.itervalues())
+    if self._evicted:
+      logging.info(
+          'Trimming evicted items with the following sizes: %s',
+          sorted(self._evicted))
 
   def _save(self):
     """Saves the LRU ordering."""
@@ -1526,44 +1306,54 @@ class DiskCache(LocalCache):
     if self.policies.max_cache_size:
       total_size = sum(self._lru.itervalues())
       while total_size > self.policies.max_cache_size:
-        total_size -= self._remove_lru_file()
+        total_size -= self._remove_lru_file(True)
 
     # Ensure maximum number of items in the cache.
     if self.policies.max_items and len(self._lru) > self.policies.max_items:
       for _ in xrange(len(self._lru) - self.policies.max_items):
-        self._remove_lru_file()
+        self._remove_lru_file(True)
 
     # Ensure enough free space.
     self._free_disk = file_path.get_free_space(self.cache_dir)
-    trimmed_due_to_space = False
+    trimmed_due_to_space = 0
     while (
         self.policies.min_free_space and
         self._lru and
         self._free_disk < self.policies.min_free_space):
-      trimmed_due_to_space = True
-      self._remove_lru_file()
-      self._free_disk = file_path.get_free_space(self.cache_dir)
+      trimmed_due_to_space += 1
+      self._remove_lru_file(True)
+
     if trimmed_due_to_space:
       total_usage = sum(self._lru.itervalues())
       usage_percent = 0.
       if total_usage:
-        usage_percent = 100. * self.policies.max_cache_size / float(total_usage)
+        usage_percent = 100. * float(total_usage) / self.policies.max_cache_size
+
       logging.warning(
-          'Trimmed due to not enough free disk space: %.1fkb free, %.1fkb '
-          'cache (%.1f%% of its maximum capacity)',
+          'Trimmed %s file(s) due to not enough free disk space: %.1fkb free,'
+          ' %.1fkb cache (%.1f%% of its maximum capacity of %.1fkb)',
+          trimmed_due_to_space,
           self._free_disk / 1024.,
           total_usage / 1024.,
-          usage_percent)
+          usage_percent,
+          self.policies.max_cache_size / 1024.)
     self._save()
 
   def _path(self, digest):
     """Returns the path to one item."""
     return os.path.join(self.cache_dir, digest)
 
-  def _remove_lru_file(self):
-    """Removes the last recently used file and returns its size."""
+  def _remove_lru_file(self, allow_protected):
+    """Removes the lastest recently used file and returns its size."""
     self._lock.assert_locked()
-    digest, size = self._lru.pop_oldest()
+    try:
+      digest, (size, _) = self._lru.get_oldest()
+      if not allow_protected and digest == self._protected:
+        raise Error('Not enough space to fetch the whole isolated tree')
+    except KeyError:
+      raise Error('Nothing to remove')
+    digest, (size, _) = self._lru.pop_oldest()
+    logging.debug('Removing LRU file %s', digest)
     self._delete_file(digest, size)
     return size
 
@@ -1574,27 +1364,34 @@ class DiskCache(LocalCache):
       size = fs.stat(self._path(digest)).st_size
     self._added.append(size)
     self._lru.add(digest, size)
-
-  def _add_oldest_list(self, digests):
-    """Adds a bunch of items into LRU cache marking them as oldest ones."""
-    self._lock.assert_locked()
-    pairs = []
-    for digest in digests:
-      size = fs.stat(self._path(digest)).st_size
-      self._added.append(size)
-      pairs.append((digest, size))
-    self._lru.batch_insert_oldest(pairs)
+    self._free_disk -= size
+    # Do a quicker version of self._trim(). It only enforces free disk space,
+    # not cache size limits. It doesn't actually look at real free disk space,
+    # only uses its cache values. self._trim() will be called later to enforce
+    # real trimming but doing this quick version here makes it possible to map
+    # an isolated that is larger than the current amount of free disk space when
+    # the cache size is already large.
+    while (
+        self.policies.min_free_space and
+        self._lru and
+        self._free_disk < self.policies.min_free_space):
+      self._remove_lru_file(False)
 
   def _delete_file(self, digest, size=UNKNOWN_FILE_SIZE):
     """Deletes cache file from the file system."""
     self._lock.assert_locked()
     try:
       if size == UNKNOWN_FILE_SIZE:
-        size = fs.stat(self._path(digest)).st_size
+        try:
+          size = fs.stat(self._path(digest)).st_size
+        except OSError:
+          size = 0
       file_path.try_remove(self._path(digest))
-      self._removed.append(size)
+      self._evicted.append(size)
+      self._free_disk += size
     except OSError as e:
-      logging.error('Error attempting to delete a file %s:\n%s' % (digest, e))
+      if e.errno != errno.ENOENT:
+        logging.error('Error attempting to delete a file %s:\n%s' % (digest, e))
 
 
 class IsolatedBundle(object):
@@ -1656,7 +1453,8 @@ class IsolatedBundle(object):
       # Wait until some *.isolated file is fetched, parse it.
       item_hash = fetch_queue.wait(pending)
       item = pending.pop(item_hash)
-      item.load(fetch_queue.cache.read(item_hash))
+      with fetch_queue.cache.getfileobj(item_hash) as f:
+        item.load(f.read())
 
       # Start fetching included *.isolated files.
       for new_child in item.children:
@@ -1688,15 +1486,21 @@ class IsolatedBundle(object):
 
     Modifies self.files.
     """
-    logging.debug('fetch_files(%s)', isolated.obj_hash)
-    for filepath, properties in isolated.data.get('files', {}).iteritems():
+    files = isolated.data.get('files', {})
+    logging.debug('fetch_files(%s, %d)', isolated.obj_hash, len(files))
+    for filepath, properties in files.iteritems():
       # Root isolated has priority on the files being mapped. In particular,
       # overridden files must not be fetched.
       if filepath not in self.files:
         self.files[filepath] = properties
+
+        # Make sure if the isolated is read only, the mode doesn't have write
+        # bits.
+        if 'm' in properties and self.read_only:
+          properties['m'] &= ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+
+        # Preemptively request hashed files.
         if 'h' in properties:
-          # Preemptively request files.
-          logging.debug('fetching %s', filepath)
           fetch_queue.add(
               properties['h'], properties['s'], threading_utils.PRIORITY_MED)
 
@@ -1720,34 +1524,6 @@ class IsolatedBundle(object):
       self.relative_cwd = node.data['relative_cwd']
 
 
-def set_storage_api_class(cls):
-  """Replaces StorageApi implementation used by default."""
-  global _storage_api_cls
-  assert _storage_api_cls is None
-  assert issubclass(cls, StorageApi)
-  _storage_api_cls = cls
-
-
-def get_storage_api(url, namespace):
-  """Returns an object that implements low-level StorageApi interface.
-
-  It is used by Storage to work with single isolate |namespace|. It should
-  rarely be used directly by clients, see 'get_storage' for
-  a better alternative.
-
-  Arguments:
-    url: URL of isolate service to use shared cloud based storage.
-    namespace: isolate namespace to operate in, also defines hashing and
-        compression scheme used, i.e. namespace names that end with '-gzip'
-        store compressed data.
-
-  Returns:
-    Instance of StorageApi subclass.
-  """
-  cls = _storage_api_cls or IsolateServer
-  return cls(url, namespace)
-
-
 def get_storage(url, namespace):
   """Returns Storage class that can upload and download from |namespace|.
 
@@ -1760,7 +1536,7 @@ def get_storage(url, namespace):
   Returns:
     Instance of Storage.
   """
-  return Storage(get_storage_api(url, namespace))
+  return Storage(isolate_storage.get_storage_api(url, namespace))
 
 
 def upload_tree(base_url, infiles, namespace):
@@ -1792,10 +1568,10 @@ def upload_tree(base_url, infiles, namespace):
 
   logging.info('Skipped %d duplicated entries', skipped)
   with get_storage(base_url, namespace) as storage:
-    storage.upload_items(items)
+    return storage.upload_items(items)
 
 
-def fetch_isolated(isolated_hash, storage, cache, outdir, require_command):
+def fetch_isolated(isolated_hash, storage, cache, outdir, use_symlinks):
   """Aggressively downloads the .isolated file(s), then download all the files.
 
   Arguments:
@@ -1803,14 +1579,14 @@ def fetch_isolated(isolated_hash, storage, cache, outdir, require_command):
     storage: Storage class that communicates with isolate storage.
     cache: LocalCache class that knows how to store and map files locally.
     outdir: Output directory to map file tree to.
-    require_command: Ensure *.isolated specifies a command to run.
+    use_symlinks: Use symlinks instead of hardlinks when True.
 
   Returns:
     IsolatedBundle object that holds details about loaded *.isolated file.
   """
   logging.debug(
       'fetch_isolated(%s, %s, %s, %s, %s)',
-      isolated_hash, storage, cache, outdir, require_command)
+      isolated_hash, storage, cache, outdir, use_symlinks)
   # Hash algorithm to use, defined by namespace |storage| is using.
   algo = storage.hash_algo
   with cache:
@@ -1831,22 +1607,16 @@ def fetch_isolated(isolated_hash, storage, cache, outdir, require_command):
 
       # Load all *.isolated and start loading rest of the files.
       bundle.fetch(fetch_queue, isolated_hash, algo)
-      if require_command and not bundle.command:
-        # TODO(vadimsh): All fetch operations are already enqueue and there's no
-        # easy way to cancel them.
-        raise IsolatedErrorNoCommand()
 
     with tools.Profiler('GetRest'):
       # Create file system hierarchy.
-      if not fs.isdir(outdir):
-        fs.makedirs(outdir)
+      file_path.ensure_tree(outdir)
       create_directories(outdir, bundle.files)
       create_symlinks(outdir, bundle.files.iteritems())
 
       # Ensure working directory exists.
       cwd = os.path.normpath(os.path.join(outdir, bundle.relative_cwd))
-      if not fs.isdir(cwd):
-        fs.makedirs(cwd)
+      file_path.ensure_tree(cwd)
 
       # Multimap: digest -> list of pairs (path, props).
       remaining = {}
@@ -1865,10 +1635,56 @@ def fetch_isolated(isolated_hash, storage, cache, outdir, require_command):
           # Wait for any item to finish fetching to cache.
           digest = fetch_queue.wait(remaining)
 
-          # Link corresponding files to a fetched item in cache.
+          # Create the files in the destination using item in cache as the
+          # source.
           for filepath, props in remaining.pop(digest):
-            cache.hardlink(
-                digest, os.path.join(outdir, filepath), props.get('m'))
+            fullpath = os.path.join(outdir, filepath)
+
+            with cache.getfileobj(digest) as srcfileobj:
+              filetype = props.get('t', 'basic')
+
+              if filetype == 'basic':
+                file_mode = props.get('m')
+                if file_mode:
+                  # Ignore all bits apart from the user
+                  file_mode &= 0700
+                putfile(
+                    srcfileobj, fullpath, file_mode,
+                    use_symlink=use_symlinks)
+
+              elif filetype == 'tar':
+                basedir = os.path.dirname(fullpath)
+                with tarfile.TarFile(fileobj=srcfileobj) as extractor:
+                  for ti in extractor:
+                    if not ti.isfile():
+                      logging.warning(
+                          'Path(%r) is nonfile (%s), skipped',
+                          ti.name, ti.type)
+                      continue
+                    fp = os.path.normpath(os.path.join(basedir, ti.name))
+                    if not fp.startswith(basedir):
+                      logging.error(
+                          'Path(%r) is outside root directory',
+                          fp)
+                    ifd = extractor.extractfile(ti)
+                    file_path.ensure_tree(os.path.dirname(fp))
+                    putfile(ifd, fp, 0700, ti.size)
+
+              elif filetype == 'ar':
+                basedir = os.path.dirname(fullpath)
+                extractor = arfile.ArFileReader(srcfileobj, fullparse=False)
+                for ai, ifd in extractor:
+                  fp = os.path.normpath(os.path.join(basedir, ai.name))
+                  if not fp.startswith(basedir):
+                    logging.error(
+                        'Path(%r) is outside root directory',
+                        fp)
+                  file_path.ensure_tree(os.path.dirname(fp))
+                  putfile(ifd, fp, 0700, ai.size)
+
+              else:
+                raise isolated_format.IsolatedError(
+                      'Unknown file type %r', filetype)
 
           # Report progress.
           duration = time.time() - last_update
@@ -1916,11 +1732,16 @@ def archive_files_to_storage(storage, files, blacklist):
     files: list of file paths to upload. If a directory is specified, a
            .isolated file is created and its hash is returned.
     blacklist: function that returns True if a file should be omitted.
+
+  Returns:
+    tuple(list(tuple(hash, path)), list(FileItem cold), list(FileItem hot)).
+    The first file in the first item is always the isolated file.
   """
   assert all(isinstance(i, unicode) for i in files), files
   if len(files) != len(set(map(os.path.abspath, files))):
     raise Error('Duplicate entries found.')
 
+  # List of tuple(hash, path).
   results = []
   # The temporary directory is only created as needed.
   tempdir = None
@@ -1970,10 +1791,10 @@ def archive_files_to_storage(storage, files, blacklist):
           raise Error('%s is neither a file or directory.' % f)
       except OSError:
         raise Error('Failed to process %s.' % f)
-    # Technically we would care about which files were uploaded but we don't
-    # much in practice.
-    _uploaded_files = storage.upload_items(items_to_upload)
-    return results
+    uploaded = storage.upload_items(items_to_upload)
+    cold = [i for i in items_to_upload if i in uploaded]
+    hot = [i for i in items_to_upload if i not in uploaded]
+    return results, cold, hot
   finally:
     if tempdir and fs.isdir(tempdir):
       file_path.rmtree(tempdir)
@@ -1989,7 +1810,8 @@ def archive(out, namespace, files, blacklist):
   files = [f.decode('utf-8') for f in files]
   blacklist = tools.gen_blacklist(blacklist)
   with get_storage(out, namespace) as storage:
-    results = archive_files_to_storage(storage, files, blacklist)
+    # Ignore stats.
+    results = archive_files_to_storage(storage, files, blacklist)[0]
   print('\n'.join('%s %s' % (r[0], r[1]) for r in results))
 
 
@@ -2008,7 +1830,7 @@ def CMDarchive(parser, args):
   add_isolate_server_options(parser)
   add_archive_options(parser)
   options, files = parser.parse_args(args)
-  process_isolate_server_options(parser, options, True)
+  process_isolate_server_options(parser, options, True, True)
   try:
     archive(options.isolate_server, options.namespace, files, options.blacklist)
   except Error as e:
@@ -2033,16 +1855,22 @@ def CMDdownload(parser, args):
   parser.add_option(
       '-t', '--target', metavar='DIR', default='download',
       help='destination directory')
+  parser.add_option(
+      '--use-symlinks', action='store_true',
+      help='Use symlinks instead of hardlinks')
   add_cache_options(parser)
   options, args = parser.parse_args(args)
   if args:
     parser.error('Unsupported arguments: %s' % args)
 
-  process_isolate_server_options(parser, options, True)
+  process_isolate_server_options(parser, options, True, True)
   if bool(options.isolated) == bool(options.file):
     parser.error('Use one of --isolated or --file, and only one.')
+  if not options.cache and options.use_symlinks:
+    parser.error('--use-symlinks require the use of a cache with --cache')
 
   cache = process_cache_options(options)
+  cache.cleanup()
   options.target = unicode(os.path.abspath(options.target))
   if options.isolated:
     if (fs.isfile(options.target) or
@@ -2076,7 +1904,7 @@ def CMDdownload(parser, args):
             storage=storage,
             cache=cache,
             outdir=options.target,
-            require_command=False)
+            use_symlinks=options.use_symlinks)
       if bundle.command:
         rel = os.path.join(options.target, bundle.relative_cwd)
         print('To run this test please run from the directory %s:' %
@@ -2103,21 +1931,30 @@ def add_isolate_server_options(parser):
            'variable ISOLATE_SERVER if set. No need to specify https://, this '
            'is assumed.')
   parser.add_option(
+      '--is-grpc', action='store_true', help='Communicate to Isolate via gRPC')
+  parser.add_option(
       '--namespace', default='default-gzip',
       help='The namespace to use on the Isolate Server, default: %default')
 
 
-def process_isolate_server_options(parser, options, set_exception_handler):
-  """Processes the --isolate-server option and aborts if not specified.
+def process_isolate_server_options(
+    parser, options, set_exception_handler, required):
+  """Processes the --isolate-server option.
 
   Returns the identity as determined by the server.
   """
   if not options.isolate_server:
-    parser.error('--isolate-server is required.')
-  try:
-    options.isolate_server = net.fix_url(options.isolate_server)
-  except ValueError as e:
-    parser.error('--isolate-server %s' % e)
+    if required:
+      parser.error('--isolate-server is required.')
+    return
+
+  if options.is_grpc:
+    isolate_storage.set_storage_api_class(isolate_storage.IsolateServerGrpc)
+  else:
+    try:
+      options.isolate_server = net.fix_url(options.isolate_server)
+    except ValueError as e:
+      parser.error('--isolate-server %s' % e)
   if set_exception_handler:
     on_error.report_on_exception_exit(options.isolate_server)
   try:
@@ -2155,7 +1992,7 @@ def add_cache_options(parser):
   parser.add_option_group(cache_group)
 
 
-def process_cache_options(options):
+def process_cache_options(options, trim=True):
   if options.cache:
     policies = CachePolicies(
         options.max_cache_size, options.min_free_space, options.max_items)
@@ -2164,7 +2001,8 @@ def process_cache_options(options):
     return DiskCache(
         unicode(os.path.abspath(options.cache)),
         policies,
-        isolated_format.get_hash_algo(options.namespace))
+        isolated_format.get_hash_algo(options.namespace),
+        trim=trim)
   else:
     return MemoryCache()
 
@@ -2191,7 +2029,9 @@ def main(args):
 
 
 if __name__ == '__main__':
+  subprocess42.inhibit_os_error_reporting()
   fix_encoding.fix_encoding()
   tools.disable_buffering()
   colorama.init()
+  file_path.enable_symlink()
   sys.exit(main(sys.argv[1:]))
