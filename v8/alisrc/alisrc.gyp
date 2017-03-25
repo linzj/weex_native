@@ -17,7 +17,7 @@
       ],
     },
     {
-        'target_name': 'weexcore',
+        'target_name': 'weexv8',
         'type': 'shared_library',
         'dependencies': [
           '<(DEPTH)/src/v8.gyp:v8',
