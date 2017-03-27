@@ -60,8 +60,6 @@ static void nativeLog(const v8::FunctionCallbackInfo<v8::Value>& name);
 static void notifyTrimMemory(const v8::FunctionCallbackInfo<v8::Value>& args);
 static void notifySerializeCodeCache(
     const v8::FunctionCallbackInfo<v8::Value>& args);
-static void compileAndRunBundle(
-    const v8::FunctionCallbackInfo<v8::Value>& args);
 static void markupState(const v8::FunctionCallbackInfo<v8::Value>& args);
 
 static v8::Persistent<v8::Context> V8context;
@@ -196,38 +194,7 @@ jint native_execJSService(JNIEnv* env, jobject object, jstring script) {
 }
 
 void native_takeHeapSnapshot(JNIEnv* env, jobject object, jstring name) {
-  if (NULL == name) return;
-
-  const char* nameStr = (env)->GetStringUTFChars(name, NULL);
-  if (NULL != nameStr) {
-    // const jclass cls = (env)->GetObjectClass(name);
-    jclass cls = (env)->FindClass("java/lang/String");
-    jmethodID mid =
-        (env)->GetMethodID(cls, "getBytes", "(Ljava/lang/String;)[B");
-    jstring charsetName = (env)->NewStringUTF("utf-8");
-    jbyteArray bytes =
-        (jbyteArray)(env)->CallObjectMethod(name, mid, charsetName);
-    jsize length = (env)->GetArrayLength(bytes);
-    jbyte* pBytes = (env)->GetByteArrayElements(bytes, JNI_FALSE);
-
-    char* filename = NULL;
-    if (length > 0) {
-      filename = (char*)malloc(length + 1);
-      memcpy(filename, pBytes, length);
-      filename[length] = 0;
-    }
-
-    (env)->ReleaseByteArrayElements(bytes, pBytes, JNI_ABORT);
-    (env)->DeleteLocalRef(charsetName);
-    (env)->DeleteLocalRef(bytes);
-    (env)->ReleaseStringUTFChars(name, nameStr);
-
-    if (filename != NULL) {
-      takeHeapSnapshot(filename);
-      free(filename);
-      filename = NULL;
-    }
-  }
+    return;
 }
 
 jint native_initFramework(JNIEnv* env, jobject object, jstring script,
@@ -239,7 +206,7 @@ jint native_initFramework(JNIEnv* env, jobject object, jstring script,
   // --noage_code";
   const char* str =
       "--noflush_code --noage_code --nocompact_code_space"
-      " --expose_gc";
+      " --expose_gc --ignition";
   v8::V8::SetFlagsFromString(str, strlen(str));
 
   // The embedder needs to tell v8 whether needs to
@@ -488,36 +455,6 @@ jint native_execJS(JNIEnv* env, jobject jthis, jstring jinstanceid,
   }
   return true;
 }
-}
-
-static void compileAndRunBundle(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  if (args[0].IsEmpty() || !args[0]->IsString() || args[1].IsEmpty() ||
-      !args[1]->IsString() || args[2].IsEmpty() || !args[2]->IsString() ||
-      args[3].IsEmpty() || !args[3]->IsString()) {
-    return;
-  }
-  base::debug::TraceScope traceScope("weex", "compileAndRunBundle");
-
-  v8::Isolate* isolate = globalIsolate;
-  v8::HandleScope handleScope(isolate);
-  v8::Isolate::Scope isolate_scope(isolate);
-  v8::Local<v8::Context> context =
-      v8::Local<v8::Context>::New(isolate, V8context);
-  v8::Context::Scope ctx_scope(context);
-
-  v8::Local<v8::String> code = args[0]->ToString();
-  v8::Local<v8::String> name = args[1]->ToString();
-  v8::Local<v8::String> digest = args[2]->ToString();
-  v8::Local<v8::String> codeCachePath = args[3]->ToString();
-
-  v8::Local<v8::Value> result;
-  {
-    result = weex::V8ScriptRunner::compileAndRunScript(
-        isolate, context, code, name, digest, codeCachePath);
-  }
-
-  args.GetReturnValue().Set(result);
 }
 
 /**
@@ -1127,9 +1064,6 @@ v8::Local<v8::Context> CreateShellContext(
 
   global->Set(v8::String::NewFromUtf8(isolate, "notifySerializeCodeCache"),
               v8::FunctionTemplate::New(isolate, notifySerializeCodeCache));
-
-  global->Set(v8::String::NewFromUtf8(isolate, "compileAndRunBundle"),
-              v8::FunctionTemplate::New(isolate, compileAndRunBundle));
 
   global->Set(v8::String::NewFromUtf8(isolate, "markupState"),
               v8::FunctionTemplate::New(isolate, markupState));
