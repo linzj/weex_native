@@ -331,7 +331,7 @@ PRIVATE
 ${ION_PRIVATE_DEFINITIONS})
 
 target_include_directories(js
-PRIVATE
+PUBLIC
 src)
 
 target_compile_options(js
@@ -344,48 +344,48 @@ mfbt
 fdlibm
 misc)
 
-set(SHELLMODULELOADER_OUTPUT
-${ION_INCLUDES}/shellmoduleloader.out.h)
-
-set(SHELLMODULELOADER_INPUT
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/js.msg
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/shell/ModuleLoader.js
-)
-
-set(SHELL_SOURCES
-    src/shell/js.cpp
-    src/shell/jsoptparse.cpp
-    src/shell/jsshell.cpp
-    src/shell/OSObject.cpp
-    ${SHELLMODULELOADER_OUTPUT}
-)
-
-add_custom_command(
-    OUTPUT ${SHELLMODULELOADER_OUTPUT}
-    MAIN_DEPENDENCY ${SHELLMODULELOADER_INPUT}
-    DEPENDS src/builtin/embedjs.py
-            ${CMAKE_SOURCE_DIR}/pyaction.py
-    COMMAND PYTHONPATH=${CMAKE_SOURCE_DIR}/js/src/builtin python pyaction.py generate_shellmoduleloader ${SHELLMODULELOADER_OUTPUT} ${SHELLMODULELOADER_INPUT}
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    VERBATIM)
-
-add_executable(ionshell
-${SHELL_SOURCES})
-
-target_include_directories(ionshell
-PRIVATE
-src)
-
-target_link_libraries(ionshell
-js)
-
-target_compile_options(ionshell
-PRIVATE
--Wno-invalid-offsetof)
-
-add_custom_command(
-    TARGET ionshell
-    POST_BUILD
-    COMMAND ${CMAKE_STRIP} $<TARGET_FILE:ionshell> -o ${CMAKE_SOURCE_DIR}/ionshell
-    VERBATIM
-)
+#set(SHELLMODULELOADER_OUTPUT
+#${ION_INCLUDES}/shellmoduleloader.out.h)
+#
+#set(SHELLMODULELOADER_INPUT
+#    ${CMAKE_CURRENT_SOURCE_DIR}/src/js.msg
+#    ${CMAKE_CURRENT_SOURCE_DIR}/src/shell/ModuleLoader.js
+#)
+#
+#set(SHELL_SOURCES
+#    src/shell/js.cpp
+#    src/shell/jsoptparse.cpp
+#    src/shell/jsshell.cpp
+#    src/shell/OSObject.cpp
+#    ${SHELLMODULELOADER_OUTPUT}
+#)
+#
+#add_custom_command(
+#    OUTPUT ${SHELLMODULELOADER_OUTPUT}
+#    MAIN_DEPENDENCY ${SHELLMODULELOADER_INPUT}
+#    DEPENDS src/builtin/embedjs.py
+#            ${CMAKE_SOURCE_DIR}/pyaction.py
+#    COMMAND PYTHONPATH=${CMAKE_SOURCE_DIR}/js/src/builtin python pyaction.py generate_shellmoduleloader ${SHELLMODULELOADER_OUTPUT} ${SHELLMODULELOADER_INPUT}
+#    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+#    VERBATIM)
+#
+#add_executable(ionshell
+#${SHELL_SOURCES})
+#
+#target_include_directories(ionshell
+#PRIVATE
+#src)
+#
+#target_link_libraries(ionshell
+#js)
+#
+#target_compile_options(ionshell
+#PRIVATE
+#-Wno-invalid-offsetof)
+#
+#add_custom_command(
+#    TARGET ionshell
+#    POST_BUILD
+#    COMMAND ${CMAKE_STRIP} $<TARGET_FILE:ionshell> -o ${CMAKE_SOURCE_DIR}/ionshell
+#    VERBATIM
+#)

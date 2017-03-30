@@ -3170,7 +3170,7 @@ static void
 SetStandardCompartmentOptions(JS::CompartmentOptions& options)
 {
     options.behaviors().setVersion(JSVERSION_DEFAULT);
-    options.creationOptions().setSharedMemoryAndAtomicsEnabled(enableSharedMemory);
+    options.creationOptions().setSharedMemoryAndAtomicsEnabled(true);
 }
 
 static JSObject*

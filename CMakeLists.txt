@@ -23,3 +23,22 @@ add_subdirectory(mfbt)
 add_subdirectory(fdlibm)
 add_subdirectory(mozglue)
 add_subdirectory(js)
+
+add_library(weexv8
+SHARED
+weexion.cpp
+Trace.cpp)
+
+target_link_libraries(weexv8
+js)
+
+target_compile_options(weexv8
+PRIVATE
+-Wno-invalid-offsetof)
+
+add_custom_command(
+    TARGET weexv8
+    POST_BUILD
+    COMMAND ${CMAKE_STRIP} $<TARGET_FILE:weexv8> -o ${CMAKE_SOURCE_DIR}/libweexv8.so
+    VERBATIM
+)
