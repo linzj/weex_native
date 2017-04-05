@@ -30,11 +30,17 @@ weexion.cpp
 Trace.cpp)
 
 target_link_libraries(weexv8
-js)
+js
+log)
 
 target_compile_options(weexv8
 PRIVATE
 -Wno-invalid-offsetof)
+
+set_target_properties(weexv8
+PROPERTIES
+LINK_FLAGS "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}//version_script.txt -Wl,--no-undefined"
+)
 
 add_custom_command(
     TARGET weexv8

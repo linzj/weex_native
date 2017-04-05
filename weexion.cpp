@@ -193,6 +193,32 @@ private:
   size_t m_len;
 };
 
+#ifdef SPIDERMONKEY_PROMISE
+using JobQueue = GCVector<JSObject*, 0, SystemAllocPolicy>;
+struct ShellAsyncTasks
+{
+  explicit ShellAsyncTasks(JSContext* cx)
+    : outstanding(0)
+    , finished(cx)
+  {
+  }
+
+  size_t outstanding;
+  Vector<JS::AsyncTask*> finished;
+};
+#endif // SPIDERMONKEY_PROMISE
+struct ShellContext
+{
+  explicit ShellContext(JSContext* cx);
+#ifdef SPIDERMONKEY_PROMISE
+  JS::PersistentRootedValue promiseRejectionTrackerCallback;
+  JS::PersistentRooted<JobQueue> jobQueue;
+  ExclusiveData<ShellAsyncTasks> asyncTasks;
+  bool drainingJobQueue;
+#endif // SPIDERMONKEY_PROMISE
+  JSContext* cx_;
+};
+
 struct JavaJSStringFinalizer : JSStringFinalizer
 {
   JavaJSStringFinalizer(JNIEnv* env, jstring str)
@@ -278,15 +304,19 @@ static jstring
 getArgumentAsJString(JNIEnv* env, JSContext* cx, CallArgs& args, int argument)
 {
   jstring ret = nullptr;
+  if (argument >= args.length())
+    return nullptr;
   HandleValue val = args[argument];
-  if (!val.isUndefined()) {
-    JSString* s = val.toString();
-    JS_FlattenString(cx, s);
-    JS::AutoCheckCannotGC nogc;
-    size_t len;
-    const char16_t* chars =
-      JS_GetTwoByteStringCharsAndLength(cx, nogc, s, &len);
-    ret = env->NewString((const jchar*)chars, len);
+  JSString* s = JS::ToString(cx, val);
+  if (s) {
+    RootedString rs(cx, s);
+    char* chars = JS_EncodeStringToUTF8(cx, rs);
+    if (!chars)
+      return nullptr;
+    ret = env->NewStringUTF(chars);
+    js_free(chars);
+  } else {
+    abort();
   }
   return ret;
 }
@@ -424,10 +454,12 @@ CallNativeModule(JSContext* cx, unsigned argc, Value* vp)
   jbyteArray jOptString = getArgumentAsJByteArrayJSON(env, cx, args, 4);
 
   if (jCallNativeModuleMethodId == NULL) {
-    jCallNativeModuleMethodId = env->GetMethodID(
-      jBridgeClazz, "callNativeModule", "(Ljava/lang/String;Ljava/lang/"
-                                        "String;Ljava/lang/String;[B[B)Ljava/"
-                                        "lang/Object;");
+    jCallNativeModuleMethodId =
+      env->GetMethodID(jBridgeClazz,
+                       "callNativeModule",
+                       "(Ljava/lang/String;Ljava/lang/"
+                       "String;Ljava/lang/String;[B[B)Ljava/"
+                       "lang/Object;");
   }
 
   jobject result = env->CallObjectMethod(jThis,
@@ -533,10 +565,12 @@ CallAddElement(JSContext* cx, unsigned argc, Value* vp)
   // callback  args[4]
   jstring jCallback = getArgumentAsJString(env, cx, args, 4);
   if (jCallAddElementMethodId == NULL) {
-    jCallAddElementMethodId = env->GetMethodID(
-      jBridgeClazz, "callAddElement", "(Ljava/lang/String;Ljava/lang/"
-                                      "String;[BLjava/lang/String;Ljava/lang/"
-                                      "String;)I");
+    jCallAddElementMethodId =
+      env->GetMethodID(jBridgeClazz,
+                       "callAddElement",
+                       "(Ljava/lang/String;Ljava/lang/"
+                       "String;[BLjava/lang/String;Ljava/lang/"
+                       "String;)I");
   }
 
   int flag = env->CallIntMethod(jThis,
@@ -595,9 +629,9 @@ NativeLog(JSContext* cx, unsigned argc, Value* vp)
   if (args.length() == 0) {
     return true;
   }
-  RootedString sb(cx, args[0].toString());
+  RootedString sb(cx, JS::ToString(cx, args[0]));
   for (int i = 1; i < args.length(); i++) {
-    RootedString right(cx, args[i].toString());
+    RootedString right(cx, JS::ToString(cx, args[i]));
     sb = JS_ConcatStrings(cx, sb, right);
   }
 
@@ -765,7 +799,7 @@ static const JSFunctionSpecWithHelp global_functions[] = {
 bool
 GlobalObjectHelper::initFunction(JSContext* cx, HandleObject globalObject)
 {
-  return !JS_DefineFunctionsWithHelp(cx, globalObject, global_functions);
+  return JS_DefineFunctionsWithHelp(cx, globalObject, global_functions);
 }
 
 JNIEnv*
@@ -849,6 +883,146 @@ global_mayResolve(const JSAtomState& names, jsid id, JSObject* maybeObj)
   return JS_MayResolveStandardClass(names, id, maybeObj);
 }
 
+static ShellContext*
+GetShellContext(JSContext* cx)
+{
+  ShellContext* sc = static_cast<ShellContext*>(JS_GetContextPrivate(cx));
+  MOZ_ASSERT(sc);
+  return sc;
+}
+
+#ifdef SPIDERMONKEY_PROMISE
+static JSObject*
+ShellGetIncumbentGlobalCallback(JSContext* cx)
+{
+  return JS::CurrentGlobalOrNull(cx);
+}
+
+static bool
+ShellEnqueuePromiseJobCallback(JSContext* cx,
+                               JS::HandleObject job,
+                               JS::HandleObject allocationSite,
+                               JS::HandleObject incumbentGlobal,
+                               void* data)
+{
+  ShellContext* sc = GetShellContext(cx);
+  MOZ_ASSERT(job);
+  return sc->jobQueue.append(job);
+}
+
+static bool
+ShellStartAsyncTaskCallback(JSContext* cx, JS::AsyncTask* task)
+{
+  ShellContext* sc = GetShellContext(cx);
+  task->user = sc;
+
+  ExclusiveData<ShellAsyncTasks>::Guard asyncTasks = sc->asyncTasks.lock();
+  asyncTasks->outstanding++;
+  return true;
+}
+
+static bool
+ShellFinishAsyncTaskCallback(JS::AsyncTask* task)
+{
+  ShellContext* sc = (ShellContext*)task->user;
+
+  ExclusiveData<ShellAsyncTasks>::Guard asyncTasks = sc->asyncTasks.lock();
+  MOZ_ASSERT(asyncTasks->outstanding > 0);
+  asyncTasks->outstanding--;
+  return asyncTasks->finished.append(task);
+}
+#endif // SPIDERMONKEY_PROMISE
+
+static bool
+DrainJobQueue(JSContext* cx)
+{
+#ifdef SPIDERMONKEY_PROMISE
+  ShellContext* sc = GetShellContext(cx);
+  if (sc->drainingJobQueue)
+    return true;
+
+  // Wait for any outstanding async tasks to finish so that the
+  // finishedAsyncTasks list is fixed.
+  while (true) {
+    AutoLockHelperThreadState lock;
+    if (!sc->asyncTasks.lock()->outstanding)
+      break;
+    HelperThreadState().wait(lock, GlobalHelperThreadState::CONSUMER);
+  }
+
+  // Lock the whole time while copying back the asyncTasks finished queue so
+  // that any new tasks created during finish() cannot racily join the job
+  // queue.  Call finish() only thereafter, to avoid a circular mutex
+  // dependency (see also bug 1297901).
+  Vector<JS::AsyncTask*> finished(cx);
+  {
+    ExclusiveData<ShellAsyncTasks>::Guard asyncTasks = sc->asyncTasks.lock();
+    finished = Move(asyncTasks->finished);
+    asyncTasks->finished.clear();
+  }
+
+  for (JS::AsyncTask* task : finished)
+    task->finish(cx);
+
+  // It doesn't make sense for job queue draining to be reentrant. At the
+  // same time we don't want to assert against it, because that'd make
+  // drainJobQueue unsafe for fuzzers. We do want fuzzers to test this, so
+  // we simply ignore nested calls of drainJobQueue.
+  sc->drainingJobQueue = true;
+
+  RootedObject job(cx);
+  JS::HandleValueArray args(JS::HandleValueArray::empty());
+  RootedValue rval(cx);
+  // Execute jobs in a loop until we've reached the end of the queue.
+  // Since executing a job can trigger enqueuing of additional jobs,
+  // it's crucial to re-check the queue length during each iteration.
+  for (size_t i = 0; i < sc->jobQueue.length(); i++) {
+    job = sc->jobQueue[i];
+    AutoCompartment ac(cx, job);
+    {
+      JS::AutoSaveExceptionState scopedExceptionState(cx);
+      JS::Call(cx, UndefinedHandleValue, job, args, &rval);
+    }
+    sc->jobQueue[i].set(nullptr);
+  }
+  sc->jobQueue.clear();
+  sc->drainingJobQueue = false;
+#endif // SPIDERMONKEY_PROMISE
+  return true;
+}
+
+static bool
+initGlobalObject(JNIEnv* env, jobject params, JSContext* cx, HandleObject glob)
+{
+  JSAutoCompartment ac(cx, glob);
+
+#ifndef LAZY_STANDARD_CLASSES
+  if (!JS_InitStandardClasses(cx, glob))
+    return false;
+#endif
+  bool succeeded;
+  if (!JS_SetImmutablePrototype(cx, glob, &succeeded))
+    return false;
+  if (!GlobalObjectHelper::initFunction(cx, glob))
+    return false;
+  GlobalObjectHelper::initWXEnvironment(env, params, cx, glob);
+
+  JS_FireOnNewGlobalObject(cx, glob);
+  return true;
+}
+
+ShellContext::ShellContext(JSContext* cx)
+  :
+#ifdef SPIDERMONKEY_PROMISE
+  promiseRejectionTrackerCallback(cx, NullValue())
+  , asyncTasks(mutexid::ShellAsyncTasks, cx)
+  , drainingJobQueue(false)
+  ,
+#endif // SPIDERMONKEY_PROMISE
+  cx_(cx)
+{
+}
+
 static const JSClassOps global_classOps = {
   nullptr,          nullptr,        nullptr,           nullptr,
   global_enumerate, global_resolve, global_mayResolve, nullptr,
@@ -860,7 +1034,7 @@ static const JSClass global_class = { "global",
                                       &global_classOps };
 }
 
-static JSContext* globalContext;
+static JSContext* globalContext = nullptr;
 static JS::Heap<JSObject*> _globalObject;
 
 // for makeIdleNotification
@@ -916,6 +1090,7 @@ jString2Log(JNIEnv* env, jstring instance, jstring str)
 static void
 setJSFVersion(JNIEnv* env, JSContext* cx, HandleObject globalObject)
 {
+  JSAutoCompartment ac(cx, globalObject);
   RootedValue version(cx);
   if (!JS_CallFunctionName(cx,
                            globalObject,
@@ -930,6 +1105,9 @@ setJSFVersion(JNIEnv* env, JSContext* cx, HandleObject globalObject)
     JS_GetPendingException(cx, &exception);
     ReportException(cx, exception, nullptr, "");
     JS_ClearPendingException(cx);
+    return;
+  }
+  if (!version.isString()) {
     return;
   }
   RootedString info(cx, version.toString());
@@ -953,6 +1131,7 @@ native_execJSService(JNIEnv* env, jobject object, jstring script)
       LOGE("jsLog JNI_Error >>> scriptStr :%s", "");
       return false;
     }
+    DrainJobQueue(globalContext);
     return true;
   }
   return false;
@@ -972,6 +1151,7 @@ native_initFramework(JNIEnv* env,
   if (globalContext)
     return false;
   if (!JS_Init()) {
+    LOGE("JS_Init failed");
     return false;
   }
   SetFakeCPUCount(2);
@@ -979,8 +1159,10 @@ native_initFramework(JNIEnv* env,
 
   /* Use the same parameters as the browser in xpcjsruntime.cpp. */
   JSContext* cx = JS_NewContext(JS::DefaultHeapMaxBytes, nurseryBytes);
-  if (!cx)
+  if (!cx) {
+    LOGE("new context failed");
     return false;
+  }
   globalContext = cx;
   JS::SetWarningReporter(cx, WarningReporter);
 
@@ -994,17 +1176,25 @@ native_initFramework(JNIEnv* env,
     .setUnboxedArrays(true);
   JS_SetGCParameter(cx, JSGC_MAX_BYTES, 0xffffffff);
 
-  size_t availMem = 1024 * 1024 * 1024;
-  JS_SetGCParametersBasedOnAvailableMemory(cx, availMem);
+  // size_t availMem = 1024 * 1024 * 1024;
+  // JS_SetGCParametersBasedOnAvailableMemory(cx, availMem);
   JS::SetBuildIdOp(cx, BuildId);
-  if (!JS::InitSelfHostedCode(cx))
+  if (!JS::InitSelfHostedCode(cx)) {
+    LOGE("failed to init self host code");
     return false;
-// FIXME: implement message loop to enable SPIDERMONKEY_PROMISE
-#if 0 && defined(SPIDERMONKEY_PROMISE) 
-    sc->jobQueue.init(cx, JobQueue(SystemAllocPolicy()));
-    JS::SetEnqueuePromiseJobCallback(cx, ShellEnqueuePromiseJobCallback);
-    JS::SetGetIncumbentGlobalCallback(cx, ShellGetIncumbentGlobalCallback);
-    JS::SetAsyncTaskCallbacks(cx, ShellStartAsyncTaskCallback, ShellFinishAsyncTaskCallback);
+  }
+  UniquePtr<ShellContext> sc_ = MakeUnique<ShellContext>(cx);
+  if (!sc_)
+    return 1;
+  JS_SetContextPrivate(cx, sc_.release());
+
+  ShellContext* sc = GetShellContext(cx);
+#if defined(SPIDERMONKEY_PROMISE)
+  sc->jobQueue.init(cx, JobQueue(SystemAllocPolicy()));
+  JS::SetEnqueuePromiseJobCallback(cx, ShellEnqueuePromiseJobCallback);
+  JS::SetGetIncumbentGlobalCallback(cx, ShellGetIncumbentGlobalCallback);
+  JS::SetAsyncTaskCallbacks(
+    cx, ShellStartAsyncTaskCallback, ShellFinishAsyncTaskCallback);
 #endif // SPIDERMONKEY_PROMISE
   JS::SetLargeAllocationFailureCallback(
     cx, my_LargeAllocFailCallback, (void*)cx);
@@ -1017,11 +1207,10 @@ native_initFramework(JNIEnv* env,
       cx, &global_class, nullptr, JS::DontFireOnNewGlobalHook, options));
   if (!glob)
     return false;
-  if (!GlobalObjectHelper::initFunction(cx, glob))
+  if (!initGlobalObject(env, params, cx, glob))
     return false;
-  GlobalObjectHelper::initWXEnvironment(env, params, cx, glob);
+  jThis = env->NewGlobalRef(object);
   _globalObject = glob;
-
   int result;
 
   using base::debug::TraceEvent;
@@ -1035,6 +1224,7 @@ native_initFramework(JNIEnv* env,
 
     setJSFVersion(env, cx, glob);
   }
+  DrainJobQueue(globalContext);
   return true;
 }
 
@@ -1060,8 +1250,8 @@ native_execJS(JNIEnv* env,
     length = env->GetArrayLength(jargs);
   }
   JSContext* cx = globalContext;
-  RootedObject globalObject(cx, _globalObject);
   JSAutoCompartment ac(cx, _globalObject);
+  RootedObject globalObject(cx, _globalObject);
   JS::AutoValueVector argv(cx);
 
   for (int i = 0; i < length; i++) {
@@ -1136,6 +1326,7 @@ native_execJS(JNIEnv* env,
     JS_ClearPendingException(cx);
     rval = false;
   }
+  DrainJobQueue(cx);
   makeIdleNotification();
 
   return rval;
@@ -1150,12 +1341,12 @@ ExecuteJavaScript(JSContext* cx,
                   jstring source,
                   bool report_exceptions)
 {
+  JSAutoCompartment ac(cx, _globalObject);
   JS::AutoSaveExceptionState scopedExceptionState(cx);
   CompileOptions option(cx);
   ScopedJString scopedScriptSource(env, source);
   const uint16_t* str = scopedScriptSource.getChars();
   size_t strLen = scopedScriptSource.getCharsLength();
-  JSAutoCompartment ac(cx, _globalObject);
   RootedValue returnValue(cx);
   bool evaluted =
     Evaluate(cx, option, (const char16_t*)str, strLen, &returnValue);
@@ -1391,6 +1582,8 @@ JNI_OnUnload(JavaVM* vm, void* reserved)
   env->DeleteGlobalRef(jWXJSObject);
   env->DeleteGlobalRef(jWXLogUtils);
   env->DeleteGlobalRef(jThis);
+  if (globalContext)
+    delete GetShellContext(globalContext);
   JS_ShutDown();
   using base::debug::TraceEvent;
   TraceEvent::StopATrace(env);
