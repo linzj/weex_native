@@ -218,23 +218,6 @@ struct ShellContext
   JSContext* cx_;
 };
 
-struct JavaJSStringFinalizer : JSStringFinalizer
-{
-  JavaJSStringFinalizer(JNIEnv* env, jstring str)
-    : m_scopedJString(env, str)
-  {
-    finalize = mystatic_finalize;
-  }
-  ScopedJString m_scopedJString;
-  void myfinalize() { delete this; }
-  static void mystatic_finalize(JS::Zone* zone,
-                                const JSStringFinalizer* fin,
-                                char16_t* chars)
-  {
-    ((JavaJSStringFinalizer*)fin)->myfinalize();
-  }
-};
-
 ScopedJStringUTF8::ScopedJStringUTF8(JNIEnv* env, jstring _jstring)
   : m_env(env)
   , m_jstring(_jstring)
@@ -1304,8 +1287,10 @@ native_execJS(JNIEnv* env,
 
   RootedValue result(cx);
   if (jnamespace == NULL) {
+    base::debug::TraceScope traceScope("weex", "CallFunctionName normal");
     JS_CallFunctionName(cx, globalObject, func.getChars(), argv, &result);
   } else {
+    base::debug::TraceScope traceScope("weex", "CallFunctionName namespace");
     RootedValue masterValue(cx);
     ScopedJStringUTF8 _namespace(env, jnamespace);
     JS_GetProperty(cx, globalObject, _namespace.getChars(), &masterValue);
@@ -1325,8 +1310,14 @@ native_execJS(JNIEnv* env,
     JS_ClearPendingException(cx);
     rval = false;
   }
-  DrainJobQueue(cx);
-  makeIdleNotification();
+  {
+    base::debug::TraceScope traceScope("weex", "DrainJobQueue");
+    DrainJobQueue(cx);
+  }
+  {
+    base::debug::TraceScope traceScope("weex", "makeIdleNotification");
+    makeIdleNotification();
+  }
 
   return rval;
 }
