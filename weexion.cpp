@@ -53,7 +53,6 @@
 #include "jswin.h"
 #endif
 #include "jswrapper.h"
-#include "shellmoduleloader.out.h"
 
 #include "builtin/ModuleObject.h"
 #include "builtin/TestingFunctions.h"
