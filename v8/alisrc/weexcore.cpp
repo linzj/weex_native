@@ -587,8 +587,11 @@ static void callNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
                          "(Ljava/lang/String;[BLjava/lang/String;)I");
   }
 
-  int flag = env->CallIntMethod(jThis, jCallNativeMethodId, jInstanceId,
-                                jTaskString, jCallback);
+  int flag = 0;
+  if (jThis) {
+    flag = env->CallIntMethod(jThis, jCallNativeMethodId, jInstanceId,
+                              jTaskString, jCallback);
+  }
   if (flag == -1) {
     LOGE("instance destroy JFM must stop callNative");
   }
@@ -685,9 +688,11 @@ void callNativeModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
                          "[B)"
                          "Ljava/lang/Object;");
   }
-  jobject result =
-      env->CallObjectMethod(jThis, jCallNativeModuleMethodId, jInstanceId,
-                            jmodule, jmethod, jArgString, jOptString);
+  jobject result = NULL;
+  if (jThis) {
+    result = env->CallObjectMethod(jThis, jCallNativeModuleMethodId, jInstanceId,
+                                   jmodule, jmethod, jArgString, jOptString);
+  }
   v8::Local<v8::Value> ret;
 
   do {
@@ -841,9 +846,10 @@ void callNativeComponent(const v8::FunctionCallbackInfo<v8::Value>& args) {
                          "V");
   }
 
-  env->CallVoidMethod(jThis, jCallNativeComponentMethodId, jInstanceId,
-                      jcomponentRef, jmethod, jArgString, jOptString);
-
+  if (jThis) {
+    env->CallVoidMethod(jThis, jCallNativeComponentMethodId, jInstanceId,
+                        jcomponentRef, jmethod, jArgString, jOptString);
+  }
   env->DeleteLocalRef(jInstanceId);
   env->DeleteLocalRef(jcomponentRef);
   env->DeleteLocalRef(jmethod);
@@ -957,7 +963,9 @@ void setTimeoutNative(const v8::FunctionCallbackInfo<v8::Value>& args) {
         env->GetMethodID(jBridgeClazz, "setTimeoutNative",
                          "(Ljava/lang/String;Ljava/lang/String;)V");
   }
-  env->CallVoidMethod(jThis, jSetTimeoutNativeMethodId, jCallbackID, jTime);
+  if (jThis) {
+    env->CallVoidMethod(jThis, jSetTimeoutNativeMethodId, jCallbackID, jTime);
+  }
   env->DeleteLocalRef(jCallbackID);
   env->DeleteLocalRef(jTime);
   args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
