@@ -1353,6 +1353,7 @@
               '-fdata-sections',
               '-ffunction-sections',
               '-O2',
+              '-g',
             ],
           }],
           ['OS=="mac"', {

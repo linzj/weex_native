@@ -2460,10 +2460,10 @@
       'target_name': 'mksnapshot',
       'type': 'executable',
       'dependencies': [
-        'v8_base',
         'v8_libbase',
         'v8_nosnapshot',
         'v8_libplatform',
+        'v8_base',
       ],
       'include_dirs+': [
         '..',
