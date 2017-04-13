@@ -177,7 +177,7 @@ void setJSFVersion(JNIEnv* env) {
 }
 
 jint native_execJSService(JNIEnv* env, jobject object, jstring script) {
-  if (script != NULL) {
+  if (globalIsolate != NULL && script != NULL) {
     const char* scriptStr = env->GetStringUTFChars(script, NULL);
     v8::HandleScope handleScope(globalIsolate);
     v8::Local<v8::String> source =
@@ -355,6 +355,10 @@ jint native_initFramework(JNIEnv* env, jobject object, jstring script,
  */
 jint native_execJS(JNIEnv* env, jobject jthis, jstring jinstanceid,
                    jstring jnamespace, jstring jfunction, jobjectArray jargs) {
+  if (globalIsolate == NULL) {
+    return false;
+  }
+
   v8::Isolate* isolate = globalIsolate;
   v8::HandleScope handleScope(isolate);
   v8::Isolate::Scope isolate_scope(isolate);
@@ -1106,6 +1110,10 @@ v8::Local<v8::Context> CreateShellContext(
 }
 
 static void takeHeapSnapshot(const char* filename) {
+  if (globalIsolate == NULL) {
+    return;
+  }
+
   LOGA("begin takeHeapSnapshot: %s", filename);
   FILE* fp = fopen(filename, "w");
   if (NULL == fp) {
