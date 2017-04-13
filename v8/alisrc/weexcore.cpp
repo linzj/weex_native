@@ -690,43 +690,66 @@ void callNativeModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
                             jmodule, jmethod, jArgString, jOptString);
   v8::Local<v8::Value> ret;
 
-  jclass jsObjectClazz = env->FindClass("com/taobao/weex/bridge/WXJSObject");
-  jfieldID jTypeId = env->GetFieldID(jsObjectClazz, "type", "I");
-  jint jTypeInt = env->GetIntField(result, jTypeId);
-  jfieldID jDataId =
-      env->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
-  jobject jDataObj = env->GetObjectField(result, jDataId);
-  if (jTypeInt == 1) {
-    if (jDoubleValueMethodId == NULL) {
-      jclass jDoubleClazz = env->FindClass("java/lang/Double");
-      jDoubleValueMethodId =
-          env->GetMethodID(jDoubleClazz, "doubleValue", "()D");
-      env->DeleteLocalRef(jDoubleClazz);
+  do {
+    if (result == NULL) {
+        break;
     }
-    jdouble jDoubleObj = env->CallDoubleMethod(jDataObj, jDoubleValueMethodId);
-    ret = v8::Number::New(isolate, (double)jDoubleObj);
 
-  } else if (jTypeInt == 2) {
-    jstring jDataStr = (jstring)jDataObj;
-    ret = jString2V8String(env, jDataStr);
-  } else if (jTypeInt == 3) {
-    v8::Local<v8::Value> jsonObj[1];
-    v8::Local<v8::Object> global = context->Global();
-    v8::Local<v8::Object> json;
-    v8::Local<v8::Function> json_parse;
-    json = v8::Local<v8::Object>::Cast(
-        global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
-    json_parse = v8::Local<v8::Function>::Cast(
-        json->Get(v8::String::NewFromUtf8(isolate, "parse")));
-    jsonObj[0] = jString2V8String(env, (jstring)jDataObj);
-    ret = json_parse->Call(json, 1, jsonObj);
+    jclass jsObjectClazz = env->FindClass("com/taobao/weex/bridge/WXJSObject");
+    jfieldID jTypeId = env->GetFieldID(jsObjectClazz, "type", "I");
+    jint jTypeInt = env->GetIntField(result, jTypeId);
+    jfieldID jDataId =
+        env->GetFieldID(jsObjectClazz, "data", "Ljava/lang/Object;");
+    jobject jDataObj = env->GetObjectField(result, jDataId);
+
+    if (jDataObj == NULL) {
+        break;
+    }
+
+    if (jTypeInt == 1) {
+      if (jDoubleValueMethodId == NULL) {
+        jclass jDoubleClazz = env->FindClass("java/lang/Double");
+        jDoubleValueMethodId =
+            env->GetMethodID(jDoubleClazz, "doubleValue", "()D");
+        env->DeleteLocalRef(jDoubleClazz);
+      }
+      jdouble jDoubleObj = env->CallDoubleMethod(jDataObj, jDoubleValueMethodId);
+      ret = v8::Number::New(isolate, (double)jDoubleObj);
+    } else if (jTypeInt == 2) {
+      jstring jDataStr = (jstring)jDataObj;
+      ret = jString2V8String(env, jDataStr);
+    } else if (jTypeInt == 3) {
+      v8::Local<v8::Value> jsonObj[1];
+      v8::Local<v8::Object> global = context->Global();
+      v8::Local<v8::Object> json;
+      v8::Local<v8::Function> json_parse;
+      json = v8::Local<v8::Object>::Cast(
+          global->Get(v8::String::NewFromUtf8(isolate, "JSON")));
+      json_parse = v8::Local<v8::Function>::Cast(
+          json->Get(v8::String::NewFromUtf8(isolate, "parse")));
+      jsonObj[0] = jString2V8String(env, (jstring)jDataObj);
+      ret = json_parse->Call(json, 1, jsonObj);
+    }
+
+    env->DeleteLocalRef(jDataObj);
+  } while (0);
+
+  if (jInstanceId != NULL) {
+    env->DeleteLocalRef(jInstanceId);
   }
-  env->DeleteLocalRef(jDataObj);
-  env->DeleteLocalRef(jInstanceId);
-  env->DeleteLocalRef(jmodule);
-  env->DeleteLocalRef(jmethod);
-  env->DeleteLocalRef(jArgString);
-  env->DeleteLocalRef(jOptString);
+  if (jmodule != NULL) {
+    env->DeleteLocalRef(jmodule);
+  }
+  if (jmethod != NULL) {
+    env->DeleteLocalRef(jmethod);
+  }
+  if (jArgString != NULL) {
+    env->DeleteLocalRef(jArgString);
+  }
+  if (jOptString != NULL) {
+    env->DeleteLocalRef(jOptString);
+  }
+
   return args.GetReturnValue().Set(ret);
 }
 
