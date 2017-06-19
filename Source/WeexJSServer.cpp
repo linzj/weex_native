@@ -114,6 +114,8 @@ using namespace WTF;
 #include "Buffering/IPCBuffer.h"
 #include "IPCArguments.h"
 #include "IPCByteArray.h"
+#include "IPCException.h"
+#include "IPCFutexPageQueue.h"
 #include "IPCHandler.h"
 #include "IPCListener.h"
 #include "IPCMessageJS.h"
@@ -121,19 +123,18 @@ using namespace WTF;
 #include "IPCSender.h"
 #include "IPCString.h"
 #include "IPCType.h"
-#include "IPCFutexPageQueue.h"
-#include "IPCException.h"
 #include "LogUtils.h"
 #include "Serializing/IPCSerializer.h"
+#include "StartSandboxHelper.h"
 #include "Trace.h"
 #include "WeexJSServer.h"
 
-#include <sys/types.h>
-#include <sys/stat.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
-#include <dlfcn.h>
 namespace {
 
 static EncodedJSValue JSC_HOST_CALL functionGCAndSweep(ExecState*);
@@ -775,18 +776,21 @@ int unique_fd::get() const
     return m_fd;
 }
 
-#define FAIL_WITH_STRERROR(tag) \
+#define FAIL_WITH_STRERROR(tag)             \
     LOGE(" fails: %s.\n", strerror(errno)); \
     return false;
 
-#define MAYBE_FAIL_WITH_ICU_ERROR(s) \
-    if (status != U_ZERO_ERROR) {\
-        LOGE("Couldn't initialize ICU (" "): %s (%s)" "\n", u_errorName(status), path.c_str()); \
-        return false; \
+#define MAYBE_FAIL_WITH_ICU_ERROR(s)            \
+    if (status != U_ZERO_ERROR) {               \
+        LOGE("Couldn't initialize ICU ("        \
+             "): %s (%s)"                       \
+             "\n",                              \
+            u_errorName(status), path.c_str()); \
+        return false;                           \
     }
 
 extern "C" {
-void udata_setCommonData(const void *data, UErrorCode *pErrorCode);
+void udata_setCommonData(const void* data, UErrorCode* pErrorCode);
 }
 
 static bool mapIcuData(const std::string& path)
@@ -898,6 +902,7 @@ WeexJSServer::WeexJSServer(int fd, bool enableTrace)
         m_impl->globalVM = std::move(VM::create(LargeHeap));
         VM& vm = *m_impl->globalVM.get();
         JSLockHolder locker(&vm);
+        startSandBox();
 
         int result;
 

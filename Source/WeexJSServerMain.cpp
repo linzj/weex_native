@@ -4,8 +4,8 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 
 extern "C" {
 int serverMain(int argc, char** argv);

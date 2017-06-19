@@ -3,6 +3,25 @@ cmake_minimum_required(VERSION 2.8.12)
 add_subdirectory(WTF)
 add_subdirectory(JavaScriptCore)
 add_subdirectory(IPC)
+add_subdirectory(Sandbox)
+
+
+add_library(WeexSandBox
+STATIC
+WeexServerPolicy.cpp
+StartSandboxHelper.cpp
+)
+
+target_link_libraries(WeexSandBox
+Sandbox log)
+
+#add_executable(TestWeexServerPolicy
+#TestWeexServerPolicy.cpp
+#Compatible.cpp
+#)
+
+#target_link_libraries(TestWeexServerPolicy
+#WeexSandBox)
 
 include(WebKitCommon)
 
@@ -51,6 +70,7 @@ set(${WEEXJSSERVER_NAME}_LIBRARY_TYPE SHARED)
 set(${WEEXJSSERVER_NAME}_LIBRARIES
 JavaScriptCore
 IPC
+WeexSandBox
 log)
 
 WEBKIT_FRAMEWORK(${WEEXJSSERVER_NAME})

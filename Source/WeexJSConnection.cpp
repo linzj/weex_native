@@ -1,11 +1,11 @@
 #include "WeexJSConnection.h"
 #include "IPCException.h"
+#include "IPCFutexPageQueue.h"
 #include "IPCLog.h"
 #include "IPCSender.h"
 #include "LogUtils.h"
 #include "Trace.h"
 #include "ashmem.h"
-#include "IPCFutexPageQueue.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -13,11 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <sys/mman.h>
 
 static void doExec(int fd, bool traceEnable);
 static void closeAllButThis(int fd);

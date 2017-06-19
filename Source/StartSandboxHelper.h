@@ -1,0 +1,4 @@
+#ifndef STARTSANDBOXHELPER_H
+#define STARTSANDBOXHELPER_H
+void startSandBox(void);
+#endif /* STARTSANDBOXHELPER_H */
