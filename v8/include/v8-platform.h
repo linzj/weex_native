@@ -52,6 +52,13 @@ class ConvertableToTraceFormat {
   virtual void AppendAsTraceFormat(std::string* out) const = 0;
 };
 
+class AbstractConstBuffer {
+ public:
+  virtual ~AbstractConstBuffer() = default;
+  virtual const void* Get() { return nullptr; }
+  virtual size_t Size() { return 0; }
+};
+
 /**
  * V8 Platform abstraction layer.
  *
@@ -212,6 +219,16 @@ class Platform {
 
   /** Removes tracing state change observer. */
   virtual void RemoveTraceStateObserver(TraceStateObserver*) {}
+
+  virtual bool HasCacheEntryExists(const uint8_t* source, int length) {
+    return true;
+  }
+  virtual void SaveCache(const uint8_t* source, int slength,
+                         const uint8_t* data, size_t dlength) {}
+  virtual std::unique_ptr<AbstractConstBuffer> LoadCache(const uint8_t* source,
+                                                         int length) {
+    return std::unique_ptr<AbstractConstBuffer>(new AbstractConstBuffer());
+  }
 };
 
 }  // namespace v8

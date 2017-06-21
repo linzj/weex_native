@@ -209,7 +209,7 @@ config("features") {
   if (v8_enable_vtunejit) {
     defines += [ "ENABLE_VTUNE_JIT_INTERFACE" ]
   }
-  if (v8_enable_object_print) {
+  if (true || v8_enable_object_print) {
     defines += [ "OBJECT_PRINT" ]
   }
   if (v8_enable_verify_heap) {

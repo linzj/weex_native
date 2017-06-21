@@ -7319,6 +7319,8 @@ class V8_EXPORT Isolate {
    */
   bool IsInUse();
 
+  void ScheduleSaveCacheOnIdle();
+
   Isolate() = delete;
   ~Isolate() = delete;
   Isolate(const Isolate&) = delete;

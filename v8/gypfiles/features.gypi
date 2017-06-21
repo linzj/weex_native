@@ -35,7 +35,7 @@
 
     'v8_enable_verify_csa%': 0,
 
-    'v8_object_print%': 0,
+    'v8_object_print%': 1,
 
     'v8_enable_verify_heap%': 0,
 

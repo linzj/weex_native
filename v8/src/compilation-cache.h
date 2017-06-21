@@ -9,6 +9,7 @@
 #include "src/objects.h"
 
 namespace v8 {
+class Platform;
 namespace internal {
 
 template <typename T>
@@ -126,6 +127,30 @@ class CompilationCacheEval: public CompilationSubCache {
   DISALLOW_IMPLICIT_CONSTRUCTORS(CompilationCacheEval);
 };
 
+class CompilationDiskCacheQueue {
+ public:
+  explicit CompilationDiskCacheQueue(Isolate* isolate);
+  ~CompilationDiskCacheQueue();
+
+  void Clear();
+  void Age();
+  void Iterate(ObjectVisitor* v);
+  void IterateFunctions(ObjectVisitor* v);
+
+  void Register(SharedFunctionInfo* function_info);
+  void SaveCache(double deadline_in_seconds, Platform* p);
+
+ private:
+  static int Advance(int);
+  void DoSaveCache(Platform* p);
+  Isolate* isolate_;
+  int start_;
+  int end_;  // end of array.
+  SharedFunctionInfo**
+      function_array_;  // Compilation cache tables - one for each generation.
+  static const int max_size = 32;
+  DISALLOW_IMPLICIT_CONSTRUCTORS(CompilationDiskCacheQueue);
+};
 
 // Sub-cache for regular expressions.
 class CompilationCacheRegExp: public CompilationSubCache {
@@ -210,6 +235,11 @@ class CompilationCache {
   void Enable();
   void Disable();
 
+  void SaveCache(double deadline_in_seconds, Platform* p);
+  Handle<SharedFunctionInfo> TryLoadCache(Handle<String> source,
+                                          Handle<Object> script_name);
+  void RegisterToDiskCache(SharedFunctionInfo* function_info);
+
  private:
   explicit CompilationCache(Isolate* isolate);
   ~CompilationCache();
@@ -229,6 +259,7 @@ class CompilationCache {
   CompilationCacheEval eval_global_;
   CompilationCacheEval eval_contextual_;
   CompilationCacheRegExp reg_exp_;
+  CompilationDiskCacheQueue disk_cache_queue_;
   CompilationSubCache* subcaches_[kSubCacheCount];
 
   // Current enable state of the compilation cache.

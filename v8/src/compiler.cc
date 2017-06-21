@@ -13,6 +13,7 @@
 #include "src/ast/ast-numbering.h"
 #include "src/ast/prettyprinter.h"
 #include "src/ast/scopes.h"
+#include "src/base/platform/platform.h"
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/compilation-cache.h"
@@ -1518,8 +1519,11 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
     vector = Handle<Cell>(eval_result.vector(), isolate);
   }
 
-  Handle<Script> script;
   if (!eval_result.has_shared()) {
+    shared_info = compilation_cache->TryLoadCache(source, Handle<Object>());
+  }
+  Handle<Script> script;
+  if (shared_info.is_null()) {
     script = isolate->factory()->NewScript(source);
     if (isolate->NeedsSourcePositionsForProfiling()) {
       Script::InitLineEnds(script);
@@ -1567,6 +1571,7 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
       Handle<Cell> new_vector(result->feedback_vector_cell(), isolate);
       compilation_cache->PutEval(source, outer_info, context, shared_info,
                                  new_vector, eval_scope_position);
+      compilation_cache->RegisterToDiskCache(*shared_info);
     }
   } else {
     result = isolate->factory()->NewFunctionFromSharedFunctionInfo(
@@ -1677,27 +1682,33 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     InfoVectorPair pair = compilation_cache->LookupScript(
         source, script_name, line_offset, column_offset, resource_options,
         context, language_mode);
-    if (!pair.has_shared() && FLAG_serialize_toplevel &&
-        compile_options == ScriptCompiler::kConsumeCodeCache &&
-        !isolate->debug()->is_loaded()) {
-      // Then check cached code provided by embedder.
-      HistogramTimerScope timer(isolate->counters()->compile_deserialize());
-      RuntimeCallTimerScope runtimeTimer(isolate,
-                                         &RuntimeCallStats::CompileDeserialize);
-      TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-                   "V8.CompileDeserialize");
-      Handle<SharedFunctionInfo> inner_result;
-      if (CodeSerializer::Deserialize(isolate, *cached_data, source)
-              .ToHandle(&inner_result)) {
-        // Promote to per-isolate compilation cache.
-        // TODO(mvstanton): create a feedback vector array here.
-        DCHECK(inner_result->is_compiled());
-        Handle<FeedbackVector> feedback_vector =
-            FeedbackVector::New(isolate, inner_result);
-        vector = isolate->factory()->NewCell(feedback_vector);
-        compilation_cache->PutScript(source, context, language_mode,
-                                     inner_result, vector);
+    if (!pair.has_shared() && FLAG_serialize_toplevel) {
+      Handle<SharedFunctionInfo> inner_result =
+          compilation_cache->TryLoadCache(source, script_name);
+      if (!inner_result.is_null()) {
         return inner_result;
+
+      } else if (compile_options == ScriptCompiler::kConsumeCodeCache &&
+                 !isolate->debug()->is_loaded()) {
+        // Then check cached code provided by embedder.
+        HistogramTimerScope timer(isolate->counters()->compile_deserialize());
+        RuntimeCallTimerScope runtimeTimer(
+            isolate, &RuntimeCallStats::CompileDeserialize);
+        TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                     "V8.CompileDeserialize");
+        Handle<SharedFunctionInfo> inner_result;
+        if (CodeSerializer::Deserialize(isolate, *cached_data, source)
+                .ToHandle(&inner_result)) {
+          // Promote to per-isolate compilation cache.
+          // TODO(mvstanton): create a feedback vector array here.
+          DCHECK(inner_result->is_compiled());
+          Handle<FeedbackVector> feedback_vector =
+              FeedbackVector::New(isolate, inner_result);
+          vector = isolate->factory()->NewCell(feedback_vector);
+          compilation_cache->PutScript(source, context, language_mode,
+                                       inner_result, vector);
+          return inner_result;
+        }
       }
       // Deserializer failed. Fall through to compile.
     } else {
@@ -1757,8 +1768,7 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     if (!context->IsNativeContext()) {
       parse_info.set_outer_scope_info(handle(context->scope_info()));
     }
-    if (FLAG_serialize_toplevel &&
-        compile_options == ScriptCompiler::kProduceCodeCache) {
+    if (FLAG_serialize_toplevel) {
       info.PrepareForSerializing();
     }
 
@@ -1773,6 +1783,7 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
       vector = isolate->factory()->NewCell(feedback_vector);
       compilation_cache->PutScript(source, context, language_mode, result,
                                    vector);
+      compilation_cache->RegisterToDiskCache(*result);
       if (FLAG_serialize_toplevel &&
           compile_options == ScriptCompiler::kProduceCodeCache &&
           !ContainsAsmModule(script)) {
@@ -1806,6 +1817,15 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
 Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForStreamedScript(
     Handle<Script> script, ParseInfo* parse_info, int source_length) {
   Isolate* isolate = script->GetIsolate();
+  CompilationCache* compilation_cache = isolate->compilation_cache();
+  Handle<Object> maybe_source(script->source(), isolate);
+  if (maybe_source->IsString()) {
+    Handle<String> source = Handle<String>::cast(maybe_source);
+    Handle<Object> script_name(script->name(), isolate);
+    Handle<SharedFunctionInfo> inner_result =
+        compilation_cache->TryLoadCache(source, script_name);
+    if (!inner_result.is_null()) return inner_result;
+  }
   // TODO(titzer): increment the counters in caller.
   isolate->counters()->total_load_size()->Increment(source_length);
   isolate->counters()->total_compile_size()->Increment(source_length);
@@ -1818,11 +1838,18 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForStreamedScript(
   CompilationInfo compile_info(&compile_zone, parse_info,
                                Handle<JSFunction>::null());
 
+  if (FLAG_serialize_toplevel) {
+    compile_info.PrepareForSerializing();
+  }
+
   // The source was parsed lazily, so compiling for debugging is not possible.
   DCHECK(!compile_info.is_debug());
 
   Handle<SharedFunctionInfo> result = CompileToplevel(&compile_info);
-  if (!result.is_null()) isolate->debug()->OnAfterCompile(script);
+  if (!result.is_null()) {
+    isolate->debug()->OnAfterCompile(script);
+    compilation_cache->RegisterToDiskCache(*result);
+  }
   return result;
 }
 

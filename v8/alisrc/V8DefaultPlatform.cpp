@@ -211,9 +211,348 @@
 #include "LogUtils.h"
 #include "V8DefaultPlatform.h"
 #include "V8WorkerThread.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <dirent.h>
+#include <android/log.h>
+#define TAG "v8-platform"
+#undef LOGD
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
+#undef LOGD
+#define LOGD(...)
 
 namespace v8 {
 namespace platform1 {
+namespace {
+
+static const size_t kSHA1Length = 20;  // Length in bytes of a SHA-1 hash.
+
+class SecureHashAlgorithm {
+ public:
+  SecureHashAlgorithm() { Init(); }
+
+  static const int kDigestSizeBytes;
+
+  void Init();
+  void Update(const void* data, size_t nbytes);
+  void Final();
+
+  // 20 bytes of message digest.
+  const unsigned char* Digest() const {
+    return reinterpret_cast<const unsigned char*>(H);
+  }
+
+ private:
+  void Pad();
+  void Process();
+
+  uint32_t A, B, C, D, E;
+
+  uint32_t H[5];
+
+  union {
+    uint32_t W[80];
+    uint8_t M[64];
+  };
+
+  uint32_t cursor;
+  uint64_t l;
+};
+
+static inline uint32_t f(uint32_t t, uint32_t B, uint32_t C, uint32_t D) {
+  if (t < 20) {
+    return (B & C) | ((~B) & D);
+  } else if (t < 40) {
+    return B ^ C ^ D;
+  } else if (t < 60) {
+    return (B & C) | (B & D) | (C & D);
+  } else {
+    return B ^ C ^ D;
+  }
+}
+
+static inline uint32_t S(uint32_t n, uint32_t X) {
+  return (X << n) | (X >> (32 - n));
+}
+
+static inline uint32_t K(uint32_t t) {
+  if (t < 20) {
+    return 0x5a827999;
+  } else if (t < 40) {
+    return 0x6ed9eba1;
+  } else if (t < 60) {
+    return 0x8f1bbcdc;
+  } else {
+    return 0xca62c1d6;
+  }
+}
+
+const int SecureHashAlgorithm::kDigestSizeBytes = 20;
+
+void SecureHashAlgorithm::Init() {
+  A = 0;
+  B = 0;
+  C = 0;
+  D = 0;
+  E = 0;
+  cursor = 0;
+  l = 0;
+  H[0] = 0x67452301;
+  H[1] = 0xefcdab89;
+  H[2] = 0x98badcfe;
+  H[3] = 0x10325476;
+  H[4] = 0xc3d2e1f0;
+}
+
+static inline uint16_t ByteSwap(uint16_t x) {
+  return __builtin_bswap16(x);
+}
+
+static inline uint32_t ByteSwap(uint32_t x) {
+  return __builtin_bswap32(x);
+}
+
+void SecureHashAlgorithm::Final() {
+  Pad();
+  Process();
+
+  for (int t = 0; t < 5; ++t)
+    H[t] = ByteSwap(H[t]);
+}
+
+void SecureHashAlgorithm::Update(const void* data, size_t nbytes) {
+  const uint8_t* d = reinterpret_cast<const uint8_t*>(data);
+  while (nbytes--) {
+    M[cursor++] = *d++;
+    if (cursor >= 64)
+      Process();
+    l += 8;
+  }
+}
+
+void SecureHashAlgorithm::Pad() {
+  M[cursor++] = 0x80;
+
+  if (cursor > 64 - 8) {
+    // pad out to next block
+    while (cursor < 64)
+      M[cursor++] = 0;
+
+    Process();
+  }
+
+  while (cursor < 64 - 8)
+    M[cursor++] = 0;
+
+  M[cursor++] = (l >> 56) & 0xff;
+  M[cursor++] = (l >> 48) & 0xff;
+  M[cursor++] = (l >> 40) & 0xff;
+  M[cursor++] = (l >> 32) & 0xff;
+  M[cursor++] = (l >> 24) & 0xff;
+  M[cursor++] = (l >> 16) & 0xff;
+  M[cursor++] = (l >> 8) & 0xff;
+  M[cursor++] = l & 0xff;
+}
+
+void SecureHashAlgorithm::Process() {
+  uint32_t t;
+
+  // Each a...e corresponds to a section in the FIPS 180-3 algorithm.
+
+  // a.
+  //
+  // W and M are in a union, so no need to memcpy.
+  // memcpy(W, M, sizeof(M));
+  for (t = 0; t < 16; ++t)
+    W[t] = ByteSwap(W[t]);
+
+  // b.
+  for (t = 16; t < 80; ++t)
+    W[t] = S(1, W[t - 3] ^ W[t - 8] ^ W[t - 14] ^ W[t - 16]);
+
+  // c.
+  A = H[0];
+  B = H[1];
+  C = H[2];
+  D = H[3];
+  E = H[4];
+
+  // d.
+  for (t = 0; t < 80; ++t) {
+    uint32_t TEMP = S(5, A) + f(t, B, C, D) + E + W[t] + K(t);
+    E = D;
+    D = C;
+    C = S(30, B);
+    B = A;
+    A = TEMP;
+  }
+
+  // e.
+  H[0] += A;
+  H[1] += B;
+  H[2] += C;
+  H[3] += D;
+  H[4] += E;
+
+  cursor = 0;
+}
+
+static void SHA1HashBytes(const unsigned char* data,
+                          size_t len,
+                          unsigned char* hash) {
+  SecureHashAlgorithm sha;
+  sha.Update(data, len);
+  sha.Final();
+
+  memcpy(hash, sha.Digest(), SecureHashAlgorithm::kDigestSizeBytes);
+}
+
+static std::string SHA1HashString(const std::string& str) {
+  char hash[SecureHashAlgorithm::kDigestSizeBytes];
+  SHA1HashBytes(reinterpret_cast<const unsigned char*>(str.c_str()),
+                str.length(), reinterpret_cast<unsigned char*>(hash));
+  return std::string(hash, SecureHashAlgorithm::kDigestSizeBytes);
+}
+
+static std::string HexEncode(const void* bytes, size_t size) {
+  static const char kHexChars[] = "0123456789ABCDEF";
+
+  // Each input byte creates two output hex characters.
+  std::string ret(size * 2, '\0');
+
+  for (size_t i = 0; i < size; ++i) {
+    char b = reinterpret_cast<const char*>(bytes)[i];
+    ret[(i * 2)] = kHexChars[(b >> 4) & 0xf];
+    ret[(i * 2) + 1] = kHexChars[b & 0xf];
+  }
+  return ret;
+}
+
+static bool PathExists(const std::string& path) {
+  struct stat mystat;
+  int stat_ret = stat(path.c_str(), &mystat);
+  if (stat_ret != -1)
+    return true;
+  return false;
+}
+
+struct FileInfo {
+  struct stat mystat;
+  struct stat& stat() {
+    return mystat;
+  }
+  size_t GetSize() const { return mystat.st_size; }
+  std::string absolute_path;
+};
+
+static size_t ComputeDirectorySize(const std::string& name,
+                                   std::vector<FileInfo>* stat_vector) {
+  DIR* dir = opendir(name.c_str());
+  if (!dir)
+    return 0U;
+  struct dirent* dirent;
+  size_t size = 0;
+  while ((dirent = readdir(dir))) {
+    if (dirent->d_name[0] == '.')
+      continue;
+    std::string absolute_path = name + dirent->d_name;
+    struct stat mystat;
+    int stat_ret = stat(absolute_path.c_str(), &mystat);
+    if (stat_ret == -1)
+      continue;
+    if (mystat.st_mode & S_IFREG) {
+      size += mystat.st_size;
+      if (stat_vector) {
+        stat_vector->push_back({mystat, absolute_path});
+      }
+    }
+  }
+  closedir(dir);
+  return size;
+}
+
+static const size_t MB = 1024 * 1024;
+static const size_t CLEANUP_THRESHOLD = 30 * MB;
+
+class MMapConstBuffer : public v8::AbstractConstBuffer {
+ public:
+  MMapConstBuffer();
+  ~MMapConstBuffer() override;
+  bool Load(const std::string& path);
+  const void* Get() override;
+  size_t Size() override;
+  void SetOffset(size_t s) { offset_ = s; }
+
+ private:
+  size_t offset_;
+  void* base_;
+  size_t file_size_;
+  size_t map_size_;
+  DISALLOW_COPY_AND_ASSIGN(MMapConstBuffer);
+};
+
+MMapConstBuffer::MMapConstBuffer()
+    : offset_(0), base_(nullptr), file_size_(0), map_size_(0) {}
+
+MMapConstBuffer::~MMapConstBuffer() {
+  if (base_) {
+    munmap(base_, map_size_);
+  }
+}
+
+bool MMapConstBuffer::Load(const std::string& path) {
+  int fd;
+  fd = open(path.c_str(), O_RDONLY);
+  if (fd == -1)
+    return false;
+  int stat_ret;
+  struct stat mystat;
+  stat_ret = fstat(fd, &mystat);
+  if (stat_ret == -1) {
+    close(fd);
+    return false;
+  }
+  size_t map_size = mystat.st_size;
+#ifndef PAGE_SIZE
+  static const size_t PAGE_SIZE = 4096;
+#endif
+  map_size = (map_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+  void* base = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (base == MAP_FAILED)
+    return false;
+  base_ = base;
+  map_size_ = map_size;
+  file_size_ = mystat.st_size;
+  return true;
+}
+
+const void* MMapConstBuffer::Get() {
+  return static_cast<uint8_t*>(base_) + offset_;
+}
+size_t MMapConstBuffer::Size() {
+  return file_size_ - offset_;
+}
+}
+
+class FakeIdleTask : public v8::Task {
+ public:
+  explicit FakeIdleTask(v8::IdleTask* t);
+  void Run() override;
+
+ private:
+  std::unique_ptr<v8::IdleTask> task_;
+};
+
+FakeIdleTask::FakeIdleTask(v8::IdleTask* t) : task_(t) {}
+
+void FakeIdleTask::Run() {
+  task_->Run(10000.0);
+}
 
 v8::platform1::V8DefaultPlatform* CreateV8DefaultPlatform(
     int thread_pool_size) {
@@ -265,7 +604,8 @@ void V8DefaultPlatform::SetThreadPoolSize(int thread_pool_size) {
 
 void V8DefaultPlatform::EnsureInitialized() {
   std::lock_guard<std::mutex> guard(lock_);
-  if (initialized_) return;
+  if (initialized_)
+    return;
   initialized_ = true;
 
   for (int i = 0; i < thread_pool_size_; ++i)
@@ -294,7 +634,8 @@ size_t V8DefaultPlatform::NumberOfAvailableBackgroundThreads() {
 }
 
 void V8DefaultPlatform::CallOnBackgroundThread(
-    Task* task, ExpectedRuntime expected_runtime) {
+    Task* task,
+    ExpectedRuntime expected_runtime) {
   LOGD("V8DefaultPlatform::CallOnBackgroundThread");
   EnsureInitialized();
   queue_.Append(task);
@@ -316,6 +657,11 @@ void V8DefaultPlatform::CallDelayedOnForegroundThread(Isolate* isolate,
   CallOnForegroundThread(isolate, task);
 }
 
+void V8DefaultPlatform::CallIdleOnForegroundThread(Isolate* isolate,
+                                                   IdleTask* task) {
+  CallOnForegroundThread(isolate, new FakeIdleTask(task));
+}
+
 static const int64_t kMillisecondsPerSecond = 1000;
 static const int64_t kMicrosecondsPerMillisecond = 1000;
 static const int64_t kMicrosecondsPerSecond =
@@ -333,6 +679,142 @@ double V8DefaultPlatform::MonotonicallyIncreasingTime() {
   }
 
   return ticks / static_cast<double>(kMicrosecondsPerSecond);
+}
+
+void V8DefaultPlatform::EnsureCacheDirectoryLoad() {
+  if (cache_directory_.empty()) {
+    cache_directory_.assign("/sdcard/weex_v8_cache/");
+  }
+}
+
+bool V8DefaultPlatform::EnsureCacheDirectoryStore() {
+  EnsureCacheDirectoryLoad();
+  struct stat mystat;
+  int stat_ret = stat(cache_directory_.c_str(), &mystat);
+  if (stat_ret == -1 && errno == ENOENT) {
+    int mkdir_ret = mkdir(cache_directory_.c_str(), 0755);
+    if (mkdir_ret == -1)
+      return false;
+  } else if (stat_ret == -1) {
+    return false;
+  }
+  if (!(mystat.st_mode & S_IFDIR))
+    return false;
+  return true;
+}
+
+std::string V8DefaultPlatform::GetCacheEntryFullPath(const uint8_t* source,
+                                                     int length) {
+  unsigned char hashed[kSHA1Length];
+  SHA1HashBytes(source, length, hashed);
+  std::string base_name = HexEncode(hashed, kSHA1Length);
+  EnsureCacheDirectoryLoad();
+  return cache_directory_ + base_name;
+}
+
+bool V8DefaultPlatform::HasCacheEntryExists(const uint8_t* source, int length) {
+  std::string cache_path = GetCacheEntryFullPath(source, length);
+  if (PathExists(cache_path)) {
+    return true;
+  }
+  last_input_ = source;
+  last_cache_directory_ = cache_path;
+  return false;
+}
+
+void V8DefaultPlatform::SaveCache(const uint8_t* source,
+                                  int slength,
+                                  const uint8_t* data,
+                                  size_t dlength) {
+  if (!EnsureCacheDirectoryStore()) {
+    return;
+  }
+  std::string cache_path;
+  if (last_input_ == source) {
+    cache_path = last_cache_directory_;
+  } else {
+    cache_path = GetCacheEntryFullPath(source, slength);
+  }
+  if (PathExists(cache_path)) {
+    return;
+  }
+  FILE* f = fopen(cache_path.c_str(), "wb");
+  if (!f)
+    return;
+  uint32_t source_length = slength;
+  uint32_t data_length = dlength;
+  if (1 != fwrite(&source_length, sizeof(uint32_t), 1, f)) {
+    goto exit;
+  }
+  if (1 != fwrite(&data_length, sizeof(uint32_t), 1, f)) {
+    goto exit;
+  }
+  fwrite(data, 1, dlength, f);
+exit:
+  fclose(f);
+  // clean every 16 stores and the first time.
+  if (store_cache_size_ == 0) {
+    store_cache_size_ = ComputeDirectorySize(cache_directory_, nullptr);
+  } else {
+    store_cache_size_ += data_length + sizeof(uint32_t) * 2;
+  }
+  if (store_cache_size_ >= CLEANUP_THRESHOLD)
+    Cleanup();
+}
+
+std::unique_ptr<v8::AbstractConstBuffer> V8DefaultPlatform::LoadCache(
+    const uint8_t* source,
+    int length) {
+  std::string cache_path = GetCacheEntryFullPath(source, length);
+  struct stat mystat;
+  LOGD("try load cache to %s for %.64s", cache_path.c_str(), source);
+  int stat_ret = stat(cache_path.c_str(), &mystat);
+  const uint32_t* header;
+  if ((stat_ret == -1) || !(mystat.st_mode & S_IFREG) ||
+      mystat.st_size <= sizeof(uint32_t) * 2) {
+    LOGD("failed to load cache: stat_ret %d, file: %d size: %llu, error: %s",
+         stat_ret, (mystat.st_mode & S_IFREG), mystat.st_size, strerror(errno));
+    return std::unique_ptr<v8::AbstractConstBuffer>(
+        new v8::AbstractConstBuffer());
+  }
+  std::unique_ptr<MMapConstBuffer> buffer(new MMapConstBuffer());
+  if (!buffer->Load(cache_path))
+    goto exit_delete;
+  header = reinterpret_cast<const uint32_t*>(buffer->Get());
+  if (header[0] != static_cast<uint32_t>(length) ||
+      header[1] != static_cast<uint32_t>(mystat.st_size - 2 * sizeof(uint32_t)))
+    goto exit_delete;
+  buffer->SetOffset(sizeof(uint32_t) * 2);
+  LOGD("loaded cached for script: %.32s", source);
+  return std::unique_ptr<v8::AbstractConstBuffer>(buffer.release());
+exit_delete:
+  unlink(cache_path.c_str());
+  return std::unique_ptr<v8::AbstractConstBuffer>(
+      new v8::AbstractConstBuffer());
+}
+
+void V8DefaultPlatform::Cleanup() {
+  std::vector<FileInfo> files;
+  size_t running_size = ComputeDirectorySize(cache_directory_, &files);
+
+  // CHECK_EQ(running_size, store_cache_size_);
+  if (running_size < CLEANUP_THRESHOLD) {
+    return;
+  }
+  auto comp = [](FileInfo& lhs, FileInfo& rhs) {
+    return lhs.stat().st_atime > rhs.stat().st_atime;
+  };
+  std::make_heap(files.begin(), files.end(), comp);
+  auto end = files.end();
+  while (running_size > CLEANUP_THRESHOLD / 2) {
+    std::pop_heap(files.begin(), end, comp);
+    end -= 1;
+    auto& candidate = *end;
+    const std::string& candidate_path = candidate.absolute_path;
+    unlink(candidate_path.c_str());
+    running_size -= candidate.GetSize();
+  }
+  store_cache_size_ = running_size;
 }
 }
 }  // namespace weex::platform

@@ -29,6 +29,7 @@
 #include "src/bootstrapper.h"
 #include "src/char-predicates-inl.h"
 #include "src/code-stubs.h"
+#include "src/compilation-cache.h"
 #include "src/compiler-dispatcher/compiler-dispatcher.h"
 #include "src/compiler.h"
 #include "src/context-measure.h"
@@ -8600,6 +8601,7 @@ void Isolate::LowMemoryNotification() {
 
 int Isolate::ContextDisposedNotification(bool dependant_context) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  this->ScheduleSaveCacheOnIdle();
   return isolate->heap()->NotifyContextDisposed(dependant_context);
 }
 
@@ -8820,6 +8822,41 @@ void Isolate::VisitWeakHandles(PersistentHandleVisitor* visitor) {
       &visitor_adapter);
 }
 
+class SaveCacheIdleTask : public IdleTask {
+ public:
+  SaveCacheIdleTask(Isolate* isolate, Platform* platform);
+  ~SaveCacheIdleTask() override;
+  virtual void Run(double deadline_in_seconds) override;
+  static inline bool Scheduled() { return scheduled_; }
+
+ private:
+  static bool scheduled_;
+  Isolate* isolate_;
+  Platform* platform_;
+};
+
+bool SaveCacheIdleTask::scheduled_ = false;
+
+SaveCacheIdleTask::SaveCacheIdleTask(Isolate* isolate, Platform* platform)
+    : isolate_(isolate), platform_(platform) {
+  scheduled_ = true;
+}
+
+SaveCacheIdleTask::~SaveCacheIdleTask() { scheduled_ = false; }
+
+void SaveCacheIdleTask::Run(double deadline_in_seconds) {
+  scheduled_ = false;
+  HandleScope handleScope(isolate_);
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(isolate_);
+  isolate->compilation_cache()->SaveCache(deadline_in_seconds, platform_);
+}
+
+void Isolate::ScheduleSaveCacheOnIdle() {
+  if (SaveCacheIdleTask::Scheduled() || !i::FLAG_serialize_toplevel) return;
+  Platform* platform = i::V8::GetCurrentPlatform();
+  platform->CallIdleOnForegroundThread(this,
+                                       new SaveCacheIdleTask(this, platform));
+}
 
 MicrotasksScope::MicrotasksScope(Isolate* isolate, MicrotasksScope::Type type)
     : isolate_(reinterpret_cast<i::Isolate*>(isolate)),

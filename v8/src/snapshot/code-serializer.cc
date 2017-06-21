@@ -115,6 +115,13 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
   if (obj->IsScript()) {
     // Wrapper object is a context-dependent JSValue. Reset it here.
     Script::cast(obj)->set_wrapper(isolate()->heap()->undefined_value());
+  } else if (obj->IsSharedFunctionInfo()) {
+    SharedFunctionInfo* function_info =
+        reinterpret_cast<SharedFunctionInfo*>(obj);
+    function_info->ClearOptimizedCodeMap();
+  } else if (obj->IsJSFunction()) {
+    JSFunction* function = reinterpret_cast<JSFunction*>(obj);
+    function->ClearTypeFeedbackInfo();
   }
 
   // Past this point we should not see any (context-specific) maps anymore.

@@ -210,6 +210,7 @@
 #include <mutex>
 #include <queue>
 #include <vector>
+#include <string>
 
 #include <v8-platform.h>
 #include "LogUtils.h"
@@ -236,14 +237,30 @@ class V8DefaultPlatform : public v8::Platform {
   // v8::Platform implementation.
   virtual size_t NumberOfAvailableBackgroundThreads() override;
   virtual void CallOnBackgroundThread(
-      Task* task, ExpectedRuntime expected_runtime) override;
+      Task* task,
+      ExpectedRuntime expected_runtime) override;
   virtual void CallOnForegroundThread(v8::Isolate* isolate,
                                       Task* task) override;
-  virtual void CallDelayedOnForegroundThread(Isolate* isolate, Task* task,
+  virtual void CallDelayedOnForegroundThread(Isolate* isolate,
+                                             Task* task,
                                              double delay_in_seconds) override;
+  virtual void CallIdleOnForegroundThread(Isolate* isolate,
+                                          IdleTask* task) override;
   virtual double MonotonicallyIncreasingTime() override;
 
+  virtual bool HasCacheEntryExists(const uint8_t* source, int length) override;
+  virtual void SaveCache(const uint8_t* source,
+                         int slength,
+                         const uint8_t* data,
+                         size_t dlength) override;
+  virtual std::unique_ptr<AbstractConstBuffer> LoadCache(const uint8_t* source,
+                                                         int length) override;
+
  private:
+  void EnsureCacheDirectoryLoad();
+  bool EnsureCacheDirectoryStore();
+  std::string GetCacheEntryFullPath(const uint8_t* source, int length);
+  void Cleanup();
   static const int kMaxThreadPoolSize;
 
   std::mutex lock_;
@@ -252,13 +269,16 @@ class V8DefaultPlatform : public v8::Platform {
   std::vector<WorkerThread*> thread_pool_;
   V8TaskQueue queue_;
   std::map<v8::Isolate*, std::queue<Task*> > main_thread_queue_;
+  size_t store_cache_size_ = 0;
+  std::string last_cache_directory_;
+  const uint8_t* last_input_ = nullptr;
+  std::string cache_directory_;
 
   DISALLOW_COPY_AND_ASSIGN(V8DefaultPlatform);
 };
 
 v8::platform1::V8DefaultPlatform* CreateV8DefaultPlatform(
     int thread_pool_size = 0);
-
 }
 }  // namespace v8::platform
 

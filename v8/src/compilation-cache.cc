@@ -4,10 +4,13 @@
 
 #include "src/compilation-cache.h"
 
+#include "include/v8-platform.h"
+
 #include "src/counters.h"
 #include "src/factory.h"
 #include "src/globals.h"
 #include "src/objects-inl.h"
+#include "src/snapshot/code-serializer.h"
 
 namespace v8 {
 namespace internal {
@@ -25,6 +28,7 @@ CompilationCache::CompilationCache(Isolate* isolate)
       eval_global_(isolate),
       eval_contextual_(isolate),
       reg_exp_(isolate, kRegExpGenerations),
+      disk_cache_queue_(isolate),
       enabled_(true) {
   CompilationSubCache* subcaches[kSubCacheCount] =
     {&script_, &eval_global_, &eval_contextual_, &reg_exp_};
@@ -355,6 +359,7 @@ void CompilationCache::Clear() {
   for (int i = 0; i < kSubCacheCount; i++) {
     subcaches_[i]->Clear();
   }
+  disk_cache_queue_.Clear();
 }
 
 
@@ -362,6 +367,7 @@ void CompilationCache::Iterate(ObjectVisitor* v) {
   for (int i = 0; i < kSubCacheCount; i++) {
     subcaches_[i]->Iterate(v);
   }
+  disk_cache_queue_.Iterate(v);
 }
 
 
@@ -369,6 +375,7 @@ void CompilationCache::IterateFunctions(ObjectVisitor* v) {
   for (int i = 0; i < kSubCacheCount; i++) {
     subcaches_[i]->IterateFunctions(v);
   }
+  disk_cache_queue_.IterateFunctions(v);
 }
 
 
@@ -376,6 +383,7 @@ void CompilationCache::MarkCompactPrologue() {
   for (int i = 0; i < kSubCacheCount; i++) {
     subcaches_[i]->Age();
   }
+  disk_cache_queue_.Age();
 }
 
 
@@ -389,6 +397,193 @@ void CompilationCache::Disable() {
   Clear();
 }
 
+void CompilationCache::SaveCache(double deadline_in_seconds, Platform* p) {
+  disk_cache_queue_.SaveCache(deadline_in_seconds, p);
+}
+
+Handle<SharedFunctionInfo> CompilationCache::TryLoadCache(
+    Handle<String> source, Handle<Object> script_name) {
+  if (!(source->length() >= 5 * KB)) {
+    return Handle<SharedFunctionInfo>();
+  }
+  source = String::Flatten(source);
+  const uint8_t* chars;
+  int length;
+  // FIXME: Move to String class
+  if (source->IsExternalOneByteString()) {
+    Handle<ExternalOneByteString> one_byte_source =
+        Handle<ExternalOneByteString>::cast(source);
+    chars = one_byte_source->GetChars();
+    length = one_byte_source->length();
+  } else if (source->IsSeqOneByteString()) {
+    Handle<SeqOneByteString> one_byte_source =
+        Handle<SeqOneByteString>::cast(source);
+    chars = one_byte_source->GetChars();
+    length = one_byte_source->length();
+  } else if (source->IsExternalTwoByteString()) {
+    Handle<ExternalTwoByteString> two_byte_source =
+        Handle<ExternalTwoByteString>::cast(source);
+    chars = reinterpret_cast<const uint8_t*>(two_byte_source->GetChars());
+    length = two_byte_source->length() * 2;
+  } else {
+    DCHECK(source->IsSeqTwoByteString());
+    Handle<SeqTwoByteString> two_byte_source =
+        Handle<SeqTwoByteString>::cast(source);
+    chars = reinterpret_cast<const uint8_t*>(two_byte_source->GetChars());
+    length = two_byte_source->length() * 2;
+  }
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+               "V8.TryCompileDeserializeFromDisk");
+  std::unique_ptr<AbstractConstBuffer> disk_cache =
+      V8::GetCurrentPlatform()->LoadCache(chars, length);
+  if (disk_cache->Size()) {
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                 "V8.DoCompileDeserializeFromDisk");
+    Handle<SharedFunctionInfo> inner_result;
+    ScriptData sd(reinterpret_cast<const byte*>(disk_cache->Get()),
+                  disk_cache->Size());
+    if (CodeSerializer::Deserialize(isolate(), &sd, source)
+            .ToHandle(&inner_result)) {
+      return inner_result;
+    }
+  }
+  return Handle<SharedFunctionInfo>();
+}
+
+void CompilationCache::RegisterToDiskCache(SharedFunctionInfo* function_info) {
+  disk_cache_queue_.Register(function_info);
+}
+
+CompilationDiskCacheQueue::CompilationDiskCacheQueue(Isolate* isolate)
+    : isolate_(isolate), start_(0), end_(0) {
+  function_array_ = NewArray<SharedFunctionInfo*>(max_size);
+}
+
+CompilationDiskCacheQueue::~CompilationDiskCacheQueue() {
+  DeleteArray(function_array_);
+}
+
+void CompilationDiskCacheQueue::Clear() {
+  start_ = 0;
+  end_ = 0;
+}
+
+void CompilationDiskCacheQueue::Age() { Clear(); }
+
+void CompilationDiskCacheQueue::Iterate(ObjectVisitor* v) {
+  int start = start_;
+  while (start != end_) {
+    v->VisitPointers(reinterpret_cast<Object**>(&function_array_[start]),
+                     reinterpret_cast<Object**>(&function_array_[start + 1]));
+    start = Advance(start);
+  }
+}
+
+void CompilationDiskCacheQueue::IterateFunctions(ObjectVisitor* v) {
+  Iterate(v);
+}
+
+void CompilationDiskCacheQueue::Register(SharedFunctionInfo* function_info) {
+  int new_end = Advance(end_);
+  if (new_end == start_) return;
+  Handle<Object> maybe_source = function_info->GetSourceCode();
+  if (!maybe_source->IsString()) return;
+  Handle<String> source = Handle<String>::cast(maybe_source);
+  if (!(source->length() >= 5 * KB)) {
+    return;
+  }
+  std::unique_ptr<char[]> script_name;
+  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+               "CompilationDiskCacheQueue::Register", "scriptName",
+               TRACE_STR_COPY(({
+                 Object* o = function_info->script();
+                 if (o->IsScript()) {
+                   Script* script = reinterpret_cast<Script*>(o);
+                   o = script->name();
+                   if (o->IsString()) {
+                     String* s = reinterpret_cast<String*>(o);
+                     script_name = s->ToCString();
+                   }
+                 }
+                 script_name.get();
+               })));
+  function_array_[end_] = function_info;
+  end_ = new_end;
+}
+
+void CompilationDiskCacheQueue::SaveCache(double deadline_in_seconds,
+                                          Platform* p) {
+  if (start_ == end_) return;
+  while (start_ != end_) {
+    DoSaveCache(p);
+    start_ = Advance(start_);
+  }
+}
+
+void CompilationDiskCacheQueue::DoSaveCache(Platform* p) {
+  SharedFunctionInfo* function_info = function_array_[start_];
+
+  Handle<Object> maybe_source_code = function_info->GetSourceCode();
+  std::unique_ptr<char[]> script_name;
+  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+               "CompilationDiskCacheQueue::DoSaveCache", "scriptName",
+               TRACE_STR_COPY(({
+                 Object* o = function_info->script();
+                 if (o->IsScript()) {
+                   Script* script = reinterpret_cast<Script*>(o);
+                   o = script->name();
+                   if (o->IsString()) {
+                     String* s = reinterpret_cast<String*>(o);
+                     script_name = s->ToCString();
+                   }
+                 }
+                 script_name.get();
+               })));
+  if (!maybe_source_code->IsString()) {
+    return;
+  }
+  Handle<String> source_code = Handle<String>::cast(maybe_source_code);
+  if (!source_code->IsFlat()) {
+    return;
+  }
+  // FIXME: Move to String class
+  const uint8_t* chars;
+  int length;
+  if (source_code->IsExternalOneByteString()) {
+    Handle<ExternalOneByteString> one_byte_source =
+        Handle<ExternalOneByteString>::cast(source_code);
+    chars = one_byte_source->GetChars();
+    length = one_byte_source->length();
+  } else if (source_code->IsSeqOneByteString()) {
+    Handle<SeqOneByteString> one_byte_source =
+        Handle<SeqOneByteString>::cast(source_code);
+    chars = one_byte_source->GetChars();
+    length = one_byte_source->length();
+  } else if (source_code->IsExternalTwoByteString()) {
+    Handle<ExternalTwoByteString> two_byte_source =
+        Handle<ExternalTwoByteString>::cast(source_code);
+    chars = reinterpret_cast<const uint8_t*>(two_byte_source->GetChars());
+    length = two_byte_source->length() * 2;
+  } else {
+    DCHECK(source_code->IsSeqTwoByteString());
+    Handle<SeqTwoByteString> two_byte_source =
+        Handle<SeqTwoByteString>::cast(source_code);
+    chars = reinterpret_cast<const uint8_t*>(two_byte_source->GetChars());
+    length = two_byte_source->length() * 2;
+  }
+  if (p->HasCacheEntryExists(chars, length)) return;
+  std::unique_ptr<ScriptData> sd;
+  sd.reset(CodeSerializer::Serialize(isolate_, handle(function_info, isolate_),
+                                     source_code));
+  p->SaveCache(chars, length, sd->data(), sd->length());
+}
+
+int CompilationDiskCacheQueue::Advance(int n) {
+#define powerof2(x) ((((x)-1) & (x)) == 0)
+  static_assert(powerof2(max_size),
+                "CompilationDiskCacheQueue::max_size must be a power of 2");
+  return (n + 1) & (max_size - 1);
+}
 
 }  // namespace internal
 }  // namespace v8

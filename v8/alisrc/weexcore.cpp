@@ -454,6 +454,10 @@ jint native_execJS(JNIEnv* env, jobject jthis, jstring jinstanceid,
     return false;
   }
   env->ReleaseStringUTFChars(jfunction, func);
+  static unsigned exe_JSCount = 0;
+  if (((++exe_JSCount) & 127) == 0) {
+    isolate->ScheduleSaveCacheOnIdle();
+  }
   for (int i = 0; i < 10; ++i) {
     if (!v8_platform->PumpMessageLoop(globalIsolate)) break;
   }

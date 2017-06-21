@@ -313,7 +313,7 @@ DEFINE_BOOL(unbox_double_arrays, true, "automatically unbox arrays of doubles")
 DEFINE_BOOL(string_slices, true, "use string slices")
 
 // Flags for Ignition.
-DEFINE_BOOL(ignition, false, "use ignition interpreter")
+DEFINE_BOOL(ignition, true, "use ignition interpreter")
 DEFINE_BOOL(ignition_deadcode, true,
             "use ignition dead code elimination optimizer")
 DEFINE_BOOL(ignition_osr, true, "enable support for OSR from ignition code")
@@ -441,7 +441,7 @@ DEFINE_BOOL(omit_map_checks_for_leaf_maps, true,
             "deoptimize the optimized code if the layout of the maps changes.")
 
 // Flags for TurboFan.
-DEFINE_BOOL(turbo, false, "enable TurboFan compiler")
+DEFINE_BOOL(turbo, true, "enable TurboFan compiler")
 DEFINE_BOOL(turbo_sp_frame_access, false,
             "use stack pointer-relative access to frame wherever possible")
 DEFINE_BOOL(turbo_preprocess_ranges, true,
@@ -639,9 +639,9 @@ DEFINE_BOOL(trace_fragmentation_verbose, false,
 DEFINE_BOOL(trace_evacuation, false, "report evacuation statistics")
 DEFINE_BOOL(trace_mutator_utilization, false,
             "print mutator utilization, allocation speed, gc speed")
-DEFINE_BOOL(flush_code, true, "flush code that we expect not to use again")
+DEFINE_BOOL(flush_code, false, "flush code that we expect not to use again")
 DEFINE_BOOL(trace_code_flushing, false, "trace code flushing progress")
-DEFINE_BOOL(age_code, true,
+DEFINE_BOOL(age_code, false,
             "track un-executed functions to age code and flush only "
             "old code (required for code flushing)")
 DEFINE_BOOL(incremental_marking, true, "use incremental marking")
