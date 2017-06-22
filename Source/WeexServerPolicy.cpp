@@ -16,7 +16,14 @@ using namespace sandbox;
 intptr_t CrashSIGSYS_Handler(const struct arch_seccomp_data& args, void* aux)
 {
     uint32_t syscall = args.nr;
-    SANDBOX_LOGE("syscall %d is not allowed", syscall);
+    SANDBOX_LOGE("syscall %d is not allowed, arg: %llx %llx %llx %llx %llx %llx"
+            , syscall
+            , args.args[0]
+            , args.args[1]
+            , args.args[2]
+            , args.args[3]
+            , args.args[4]
+            , args.args[5]);
     _exit(1);
 }
 
@@ -68,6 +75,8 @@ sandbox::bpf_dsl::ResultExpr WeexServerPolicy::EvaluateSyscall(int sysno) const
     case __NR_sched_yield:
     case __NR_set_tid_address:
     case __NR_sigaltstack:
+    case __NR_brk:
+    case __NR_mremap:
     // for systrace support.
     case __NR_write:
     case __NR_writev:
