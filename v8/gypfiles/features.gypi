@@ -29,7 +29,7 @@
 
 {
   'variables': {
-    'v8_enable_disassembler%': 0,
+    'v8_enable_disassembler%': 1,
 
     'v8_enable_gdbjit%': 0,
 

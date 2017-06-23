@@ -52,6 +52,9 @@
         'd8.cc',
         '<(SHARED_INTERMEDIATE_DIR)/d8-js.cc',
       ],
+      'libraries': [
+        '-llog',
+      ],
       'conditions': [
         [ 'want_separate_host_toolset==1', {
           'toolsets': [ 'target', ],

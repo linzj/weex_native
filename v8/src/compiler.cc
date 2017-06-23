@@ -1121,6 +1121,8 @@ MaybeHandle<Code> GetLazyCode(Handle<JSFunction> function) {
   Zone compile_zone(isolate->allocator(), ZONE_NAME);
   CompilationInfo info(&compile_zone, &parse_info, function);
   Handle<Code> result;
+
+  info.PrepareForSerializing();
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, result, GetUnoptimizedCode(&info, Compiler::CONCURRENT), Code);
 

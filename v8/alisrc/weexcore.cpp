@@ -206,7 +206,7 @@ jint native_initFramework(JNIEnv* env, jobject object, jstring script,
   // --noage_code";
   const char* str =
       "--noflush_code --noage_code --nocompact_code_space"
-      " --expose_gc --ignition";
+      " --expose_gc";
   v8::V8::SetFlagsFromString(str, strlen(str));
 
   // The embedder needs to tell v8 whether needs to

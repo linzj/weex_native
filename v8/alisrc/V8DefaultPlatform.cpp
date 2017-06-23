@@ -219,6 +219,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <android/log.h>
+#include "Trace.h"
 #define TAG "v8-platform"
 #undef LOGD
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -767,13 +768,14 @@ std::unique_ptr<v8::AbstractConstBuffer> V8DefaultPlatform::LoadCache(
     int length) {
   std::string cache_path = GetCacheEntryFullPath(source, length);
   struct stat mystat;
-  LOGD("try load cache to %s for %.64s", cache_path.c_str(), source);
+  // LOGD("try load cache to %s for %.64s", cache_path.c_str(), source);
   int stat_ret = stat(cache_path.c_str(), &mystat);
   const uint32_t* header;
   if ((stat_ret == -1) || !(mystat.st_mode & S_IFREG) ||
       mystat.st_size <= sizeof(uint32_t) * 2) {
-    LOGD("failed to load cache: stat_ret %d, file: %d size: %llu, error: %s",
-         stat_ret, (mystat.st_mode & S_IFREG), mystat.st_size, strerror(errno));
+    // LOGD("failed to load cache: stat_ret %d, file: %d size: %llu, error: %s",
+    //      stat_ret, (mystat.st_mode & S_IFREG), mystat.st_size,
+    //      strerror(errno));
     return std::unique_ptr<v8::AbstractConstBuffer>(
         new v8::AbstractConstBuffer());
   }
@@ -785,7 +787,7 @@ std::unique_ptr<v8::AbstractConstBuffer> V8DefaultPlatform::LoadCache(
       header[1] != static_cast<uint32_t>(mystat.st_size - 2 * sizeof(uint32_t)))
     goto exit_delete;
   buffer->SetOffset(sizeof(uint32_t) * 2);
-  LOGD("loaded cached for script: %.32s", source);
+  // LOGD("loaded cached for script: %.32s", source);
   return std::unique_ptr<v8::AbstractConstBuffer>(buffer.release());
 exit_delete:
   unlink(cache_path.c_str());
@@ -815,6 +817,53 @@ void V8DefaultPlatform::Cleanup() {
     running_size -= candidate.GetSize();
   }
   store_cache_size_ = running_size;
+}
+
+uint64_t V8DefaultPlatform::AddTraceEvent(
+    char phase,
+    const uint8_t* category_enabled_flag,
+    const char* name,
+    const char* scope,
+    uint64_t id,
+    uint64_t bind_id,
+    int32_t num_args,
+    const char** arg_names,
+    const uint8_t* arg_types,
+    const uint64_t* arg_values,
+    std::unique_ptr<v8::ConvertableToTraceFormat>* arg_convertables,
+    unsigned int flags) {
+  switch (phase) {
+    case 'B':
+    case 'X':
+      TRACE_EVENT_BEGIN0("v8", name);
+      break;
+    case 'E':
+      TRACE_EVENT_END0("v8", name);
+      break;
+    case 'I': {
+      base::debug::TraceScope scope("v8", name);
+    } break;
+    default:
+      break;
+  }
+  return 0;
+}
+
+void V8DefaultPlatform::UpdateTraceEventDuration(
+    const uint8_t* category_enabled_flag,
+    const char* name,
+    uint64_t handle) {
+  TRACE_EVENT_END0("v8", name);
+}
+
+void V8DefaultPlatform::AddTraceStateObserver(
+    v8::Platform::TraceStateObserver* observer) {
+  observer->OnTraceEnabled();
+}
+
+const uint8_t* V8DefaultPlatform::GetCategoryGroupEnabled(const char* name) {
+  static uint8_t no = 0;
+  return &no;
 }
 }
 }  // namespace weex::platform
