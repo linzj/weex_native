@@ -8,6 +8,7 @@
 
 #include <fstream>  // NOLINT(readability/streams)
 #include <sstream>
+#include <unordered_map>
 
 #include "src/assembler-inl.h"
 #include "src/ast/ast-value-factory.h"
@@ -47,6 +48,7 @@
 #include "src/tracing/tracing-category-observer.h"
 #include "src/v8.h"
 #include "src/version.h"
+#include "src/utils.h"
 #include "src/vm-state-inl.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects.h"
@@ -3703,3 +3705,61 @@ bool PostponeInterruptsScope::Intercept(StackGuard::InterruptFlag flag) {
 
 }  // namespace internal
 }  // namespace v8
+
+extern "C" {
+void __attribute__((visibility("default"))) PrintCodes(void);
+const char* cache_dir;
+}
+
+void PrintCodes(void) {
+  using namespace v8::internal;
+  std::string path(cache_dir);
+  path += "/codes.txt";
+  FILE* f = fopen(path.c_str(), "r");
+  if (!f)
+    return;
+  Isolate* isolate = reinterpret_cast<Isolate*>(v8::Isolate::GetCurrent());
+  typedef std::unordered_map<void*, std::vector<Address> > CodeMap;
+  CodeMap code_map;
+  char buf[256];
+  const char* address_string;
+  while ((address_string = fgets(buf, 256, f))) {
+    Address p = reinterpret_cast<Address>(strtoull(address_string, nullptr, 16));
+#if !USE_SIMULATOR
+#ifndef PAGE_SIZE
+  static const size_t PAGE_SIZE = 4096;
+#endif
+    void* page_start = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) & ~(PAGE_SIZE - 1));
+    if (page_start == reinterpret_cast<void*>(v8::internal::memcopy_uint16_uint8_function)) {
+      continue;
+    }
+#endif
+    Code* code = isolate->FindCodeObject(p);
+    if (!code)
+      continue;
+    auto it = code_map.find(code);
+    if (it == code_map.end()) {
+      code_map.insert({code, {p} });
+    } else {
+      it->second.push_back(p);
+    }
+  }
+  fclose(f);
+  for (auto& p : code_map) {
+    PrintF("%p\t", p.first);
+    bool first = true;
+    for (auto a : p.second) {
+      if (first)
+        first = false;
+      else
+        PrintF(",");
+      PrintF("%p", a);
+    }
+    PrintF("\t%zu\n", p.second.size());
+  }
+  for (auto& p : code_map) {
+    PrintF("\nCode: %p\n", p.first);
+    static_cast<Code*>(p.first)->Print();
+  }
+  fflush(stdout);
+}

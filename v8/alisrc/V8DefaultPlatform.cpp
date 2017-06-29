@@ -682,9 +682,15 @@ double V8DefaultPlatform::MonotonicallyIncreasingTime() {
   return ticks / static_cast<double>(kMicrosecondsPerSecond);
 }
 
+extern "C" {
+    extern const char* cache_dir;
+}
+
 void V8DefaultPlatform::EnsureCacheDirectoryLoad() {
   if (cache_directory_.empty()) {
-    cache_directory_.assign("/sdcard/weex_v8_cache/");
+    std::string path(cache_dir);
+    path += "/weex_v8_cache/";
+    cache_directory_.assign(std::move(path));
   }
 }
 

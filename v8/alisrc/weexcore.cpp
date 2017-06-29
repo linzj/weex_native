@@ -61,6 +61,11 @@ static void notifyTrimMemory(const v8::FunctionCallbackInfo<v8::Value>& args);
 static void notifySerializeCodeCache(
     const v8::FunctionCallbackInfo<v8::Value>& args);
 static void markupState(const v8::FunctionCallbackInfo<v8::Value>& args);
+static const char* getCacheDir(JNIEnv* env);
+extern "C" {
+    extern const char* cache_dir;
+}
+
 
 static v8::Persistent<v8::Context> V8context;
 static v8::Isolate* globalIsolate;
@@ -206,7 +211,16 @@ jint native_initFramework(JNIEnv* env, jobject object, jstring script,
   // --noage_code";
   const char* str =
       "--noflush_code --noage_code --nocompact_code_space"
-      " --expose_gc";
+      " --expose_gc --code-comments";
+  {
+      cache_dir = getCacheDir(env);
+      LOGE("cache_dir: %s", cache_dir);
+      std::string path(cache_dir);
+      std::string stdoutlog = path + "/stdout.log";
+      std::string stderrlog = path + "/stderr.log";
+      freopen(stdoutlog.c_str(), "w", stdout);
+      freopen(stderrlog.c_str(), "w", stderr);
+  }
   v8::V8::SetFlagsFromString(str, strlen(str));
 
   // The embedder needs to tell v8 whether needs to
@@ -1292,4 +1306,63 @@ void JNI_OnUnload(JavaVM* vm, void* reserved) {
   using base::debug::TraceEvent;
   TraceEvent::StopATrace(env);
   LOGD(" end JNI_OnUnload");
+}
+
+const char* getCacheDir(JNIEnv* env)
+{
+    jclass activityThreadCls, applicationCls, fileCls;
+    jobject applicationObj, fileObj, pathStringObj;
+    jmethodID currentApplicationMethodId, getCacheDirMethodId, getAbsolutePathMethodId;
+    static std::string storage;
+    const char* tmp;
+    const char* ret = nullptr;
+    activityThreadCls = env->FindClass("android/app/ActivityThread");
+    if (!activityThreadCls || env->ExceptionOccurred()) {
+        goto no_class;
+    }
+    currentApplicationMethodId = env->GetStaticMethodID(activityThreadCls, "currentApplication", "()Landroid/app/Application;");
+    if (!currentApplicationMethodId || env->ExceptionOccurred()) {
+        goto no_currentapplication_method;
+    }
+    applicationObj = env->CallStaticObjectMethod(activityThreadCls, currentApplicationMethodId, nullptr);
+    if (!applicationObj || env->ExceptionOccurred()) {
+        goto no_application;
+    }
+    applicationCls = env->GetObjectClass(applicationObj);
+    getCacheDirMethodId = env->GetMethodID(applicationCls, "getCacheDir", "()Ljava/io/File;");
+    if (!getCacheDirMethodId || env->ExceptionOccurred()) {
+        goto no_getcachedir_method;
+    }
+    fileObj = env->CallObjectMethod(applicationObj, getCacheDirMethodId, nullptr);
+    if (!fileObj || env->ExceptionOccurred()) {
+        goto no_file_obj;
+    }
+    fileCls = env->GetObjectClass(fileObj);
+    getAbsolutePathMethodId = env->GetMethodID(fileCls, "getAbsolutePath", "()Ljava/lang/String;");
+    if (!getAbsolutePathMethodId || env->ExceptionOccurred()) {
+        goto no_getabsolutepath_method;
+    }
+    pathStringObj = env->CallObjectMethod(fileObj, getAbsolutePathMethodId, nullptr);
+    if (!pathStringObj || env->ExceptionOccurred()) {
+        goto no_path_string;
+    }
+    tmp = env->GetStringUTFChars(reinterpret_cast<jstring>(pathStringObj), nullptr);
+    storage.assign(tmp);
+    env->ReleaseStringUTFChars(reinterpret_cast<jstring>(pathStringObj), tmp);
+    ret = storage.c_str();
+no_path_string:
+no_getabsolutepath_method:
+    env->DeleteLocalRef(fileCls);
+    env->DeleteLocalRef(fileObj);
+no_file_obj:
+no_getcachedir_method:
+    env->DeleteLocalRef(applicationCls);
+    env->DeleteLocalRef(applicationObj);
+no_application:
+no_currentapplication_method:
+    env->DeleteLocalRef(activityThreadCls);
+no_class:
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+    return ret;
 }

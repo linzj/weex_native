@@ -467,8 +467,7 @@ V8_INLINE void MemCopyUint8Wrapper(uint8_t* dest, const uint8_t* src,
 // For values < 16, the assembler function is slower than the inlined C code.
 const int kMinComplexMemCopy = 16;
 V8_INLINE void MemCopy(void* dest, const void* src, size_t size) {
-  (*memcopy_uint8_function)(reinterpret_cast<uint8_t*>(dest),
-                            reinterpret_cast<const uint8_t*>(src), size);
+  memcpy(dest, src, size);
 }
 V8_EXPORT_PRIVATE V8_INLINE void MemMove(void* dest, const void* src,
                                          size_t size) {
