@@ -1538,6 +1538,7 @@ void AccessorAssembler::TryProbeStubCache(StubCache* stub_cache, Node* receiver,
 //////////////////// Entry points into private implementation (one per stub).
 
 void AccessorAssembler::LoadIC(const LoadICParameters* p) {
+#if 1
   Variable var_handler(this, MachineRepresentation::kTagged);
   // TODO(ishell): defer blocks when it works.
   Label if_handler(this, &var_handler), try_polymorphic(this),
@@ -1588,6 +1589,28 @@ void AccessorAssembler::LoadIC(const LoadICParameters* p) {
     TailCallRuntime(Runtime::kLoadIC_Miss, p->context, p->receiver, p->name,
                     p->slot, p->vector);
   }
+#else
+  Label miss(this /*, Label::kDeferred*/);
+  Label test_uninitialized(this);
+  Label try_uninitialized(this);
+  Node* handler = CallRuntime(Runtime::kLoadIC_Runtime, p->context, p->receiver, p->name,
+                  p->slot, p->vector);
+  GotoIf(WordEqual(handler, IntPtrConstant(0)), &miss);
+  GotoIf(WordEqual(handler, IntPtrConstant(1)), &try_uninitialized);
+  { HandleLoadICHandlerCase(p, handler, &miss); }
+  Bind(&miss);
+  {
+    TailCallRuntime(Runtime::kLoadIC_Miss, p->context, p->receiver, p->name,
+                    p->slot, p->vector);
+  }
+
+  Bind(&try_uninitialized);
+  {
+    // Check uninitialized case.
+    TailCallStub(CodeFactory::LoadIC_Uninitialized(isolate()), p->context,
+                 p->receiver, p->name, p->slot, p->vector);
+  }
+#endif
 }
 
 void AccessorAssembler::LoadIC_Uninitialized(const LoadICParameters* p) {

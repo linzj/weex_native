@@ -30,6 +30,13 @@
 #include "src/runtime/runtime.h"
 #include "src/tracing/trace-event.h"
 #include "src/tracing/tracing-category-observer.h"
+#if !USE_SIMULATOR
+#include <android/log.h>
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "v8-debug", __VA_ARGS__)
+// #define LOGD(...)
+#else
+#define LOGD(...)
+#endif
 
 namespace v8 {
 namespace internal {
@@ -2559,6 +2566,158 @@ RUNTIME_FUNCTION(Runtime_LoadIC_Miss) {
     ic.UpdateState(receiver, key);
     RETURN_RESULT_OR_FAILURE(isolate, ic.Load(receiver, key));
   }
+}
+
+
+namespace {
+class LoadICRuntime
+{
+ public:
+  LoadICRuntime(Isolate* isolate, Arguments args);
+  Object* Load();
+ private:
+  Object* Miss();
+  // Object* SmiHandlerCase(int value);
+  // Object* ProtoHandlerCase(HeapObject* handler);
+  // Object* ICHandlerCase(Object* handler);
+
+  Isolate* isolate_;
+  Handle<Object> receiver_;
+  Handle<Name> key_;
+  Handle<FeedbackVector> vector_;
+  FeedbackSlot slot_;
+};
+
+
+LoadICRuntime::LoadICRuntime(Isolate* isolate, Arguments args): isolate_(isolate) {
+  receiver_ = args.at(0);
+  key_ = Handle<Name>::cast(args.at(1));
+  Handle<Smi> slot = Handle<Smi>::cast(args.at(2));
+  vector_ = Handle<FeedbackVector>::cast(args.at(3));
+  slot_ = vector_->ToSlot(slot->value());
+}
+
+
+Object* LoadICRuntime::Load() {
+  Map* map;
+  if (!receiver_->IsSmi()) {
+    Handle<HeapObject> ho = Handle<HeapObject>::cast(receiver_);
+    map = ho->map();
+  } else {
+    map = isolate_->heap()->heap_number_map();
+  }
+  if (Map::Deprecated::decode(map->bit_field3())) {
+    // LOGD("Miss for deprecated map");
+    return Miss();
+  }
+  LoadICNexus feedback_nexus(vector_, slot_);
+  Object* maybe_weak_cell = feedback_nexus.GetFeedback();
+  if (map == WeakCell::cast(maybe_weak_cell)->value()) {
+    // LOGD("MonomorphicCase");
+    Object* handler = feedback_nexus.GetFeedbackExtra();
+    return handler;
+  } else if (maybe_weak_cell->IsFixedArray()) {
+    FixedArray* feedbacks = FixedArray::cast(maybe_weak_cell);
+    for (int i = 0; i < feedbacks->length(); i += 2) {
+      Object* value = feedbacks->get(i);
+      if (WeakCell::cast(value)->value() == map)  {
+        // LOGD("polymorphic case");
+        return feedbacks->get(i + 1);
+      }
+    }
+  }
+  if (!receiver_->IsSmi() && maybe_weak_cell == isolate_->heap()->megamorphic_symbol()) {
+    StubCache* load_cache = isolate_->load_stub_cache();
+    Object* handler = load_cache->Get(Name::cast(*key_), map);
+    if (handler) {
+      // LOGD("MegamorphicCase");
+      return handler;
+    }
+    if (maybe_weak_cell == isolate_->heap()->uninitialized_symbol()) {
+      // LOGD("Uninitialized case");
+      return Smi::FromInt(1);
+    }
+  }
+  // LOGD("Miss for end of case");
+  return Miss();
+}
+
+
+#if 0
+Object* LoadICRuntime::SmiHandlerCase(int value) {
+  LoadHandler::Kind kind = LoadHandler::KindBits::decode(value);
+  switch (kind) {
+    case LoadHandler::kForFields: {
+      int field_offset = LoadHandler::FieldOffsetBits::decode(value);
+      bool in_object = LoadHandler::IsInobjectBits::decode(value);
+      if (in_object) {
+        if (!LoadHandler::IsDoubleBits::decode(value) || !FLAG_unbox_double_fields) {
+          return *HeapObject::RawField(HeapObject::cast(*receiver_), field_offset);
+        } else if (FLAG_unbox_double_fields) {
+          double* val = reinterpret_cast<double*>(HeapObject::RawField(HeapObject::cast(*receiver_), field_offset));
+          return *isolate_->factory()->NewNumber(*val);
+        }
+      } else {
+        Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(receiver_);
+        FixedArray* properties = receiver->properties();
+        return *HeapObject::RawField(properties, field_offset);
+      }
+    }
+      break;
+    case LoadHandler::kForConstants: {
+      Map* map = Handle<HeapObject>::cast(receiver_)->map();
+      DescriptorArray* instance_descriptors = map->instance_descriptors();
+      int index = LoadHandler::DescriptorBits::decode(value);
+      Object* constant_value = instance_descriptors->GetValue(index);
+      if (!LoadHandler::IsAccessorInfoBits::decode(value)) {
+        return constant_value;
+      } else {
+        LOGD("Miss for accessor");
+        return Miss();
+      }
+    }
+      break;
+    default:
+      break;
+  }
+  LOGD("Miss for smi handler ends");
+  return Miss(); 
+}
+
+
+Object* LoadICRuntime::ProtoHandlerCase(HeapObject* handler)
+{
+  LOGD("Miss for ProtoHandlerCase");
+  return Miss();
+}
+
+
+Object* LoadICRuntime::ICHandlerCase(Object* handler) {
+  if (handler->IsSmi()) {
+    int value = Smi::cast(handler)->value();
+    return SmiHandlerCase(value);
+  } else if (handler->IsCode()) {
+    LOGD("Miss for handler code");
+    return Miss();
+  } else {
+    return ProtoHandlerCase(HeapObject::cast(handler));
+  }
+}
+#endif
+
+
+Object* LoadICRuntime::Miss() {
+  return nullptr;
+}
+}
+
+
+Object* Runtime_LoadIC_Runtime(int argc, v8::internal::Object** argv, v8::internal::Isolate* isolate) {
+  HandleScope scope(isolate);
+  Arguments args(argc, argv);
+  LoadICRuntime ic_runtime(isolate, args);
+  Object* ret = ic_runtime.Load();
+  return ret;
 }
 
 // Used from ic-<arch>.cc.

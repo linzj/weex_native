@@ -1007,6 +1007,7 @@ class Assembler : public AssemblerBase {
 
   // Preload instructions
   void pld(const MemOperand& address);
+  void pli(const MemOperand& address);
 
   // Load/Store multiple instructions
   void ldm(BlockAddrMode am, Register base, RegList dst, Condition cond = al);

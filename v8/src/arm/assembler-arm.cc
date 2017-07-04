@@ -2244,6 +2244,23 @@ void Assembler::pld(const MemOperand& address) {
        0xf*B12 | offset);
 }
 
+void Assembler::pli(const MemOperand& address) {
+  // Instruction details available in ARM DDI 0406C.b, A8.8.128.
+  // 1111(31-28) | 0100(27-24) | U(23) | R(22) | 01(21-20) | Rn(19-16) |
+  // 1111(15-12) | imm5(11-07) | type(6-5) | 0(4)| Rm(3-0) |
+  DCHECK(address.rm().is(no_reg));
+  DCHECK(address.am() == Offset);
+  int U = B23;
+  int offset = address.offset();
+  if (offset < 0) {
+    offset = -offset;
+    U = 0;
+  }
+  DCHECK(offset < 4096);
+  emit(kSpecialCondition | B26 | U | B22 | B20 | address.rn().code()*B16 |
+       0xf*B12 | offset);
+}
+
 
 // Load/Store multiple instructions.
 void Assembler::ldm(BlockAddrMode am,
