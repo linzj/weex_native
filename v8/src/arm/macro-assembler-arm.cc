@@ -95,7 +95,8 @@ int MacroAssembler::CallStubSize(
 void MacroAssembler::Call(Address target,
                           RelocInfo::Mode rmode,
                           Condition cond,
-                          TargetAddressStorageMode mode) {
+                          TargetAddressStorageMode mode,
+                          bool load_cache) {
   // Block constant pool for the call instruction sequence.
   BlockConstPoolScope block_const_pool(this);
   Label start;
@@ -124,6 +125,7 @@ void MacroAssembler::Call(Address target,
   //                      @ return address
 
   mov(ip, Operand(reinterpret_cast<int32_t>(target), rmode));
+  if (load_cache) pli(MemOperand(ip, 0));
   blx(ip, cond);
 
   DCHECK_EQ(expected_size, SizeOfCodeGeneratedSince(&start));
@@ -146,7 +148,8 @@ void MacroAssembler::Call(Handle<Code> code,
                           RelocInfo::Mode rmode,
                           TypeFeedbackId ast_id,
                           Condition cond,
-                          TargetAddressStorageMode mode) {
+                          TargetAddressStorageMode mode,
+                          bool load_cache) {
   Label start;
   bind(&start);
   DCHECK(RelocInfo::IsCodeTarget(rmode));
@@ -156,7 +159,8 @@ void MacroAssembler::Call(Handle<Code> code,
   }
   // 'code' is always generated ARM code, never THUMB code
   AllowDeferredHandleDereference embedding_raw_address;
-  Call(reinterpret_cast<Address>(code.location()), rmode, cond, mode);
+  Call(reinterpret_cast<Address>(code.location()), rmode, cond, mode,
+       load_cache);
 }
 
 void MacroAssembler::CallDeoptimizer(Address target) {

@@ -110,10 +110,12 @@ class MacroAssembler: public Assembler {
   void Call(Register target, Condition cond = al);
   void Call(Address target, RelocInfo::Mode rmode,
             Condition cond = al,
-            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
+            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS,
+            bool load_cache = false);
   void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
             TypeFeedbackId ast_id = TypeFeedbackId::None(), Condition cond = al,
-            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
+            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS,
+            bool load_cache = false);
   int CallSize(Handle<Code> code,
                RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
                TypeFeedbackId ast_id = TypeFeedbackId::None(),

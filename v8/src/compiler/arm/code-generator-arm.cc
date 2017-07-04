@@ -614,8 +614,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchCallCodeObject: {
       EnsureSpaceForLazyDeopt();
       if (instr->InputAt(0)->IsImmediate()) {
-        __ Call(Handle<Code>::cast(i.InputHeapObject(0)),
-                RelocInfo::CODE_TARGET);
+        Handle<Code> code_obj = Handle<Code>::cast(i.InputHeapObject(0));
+        bool load_cache = false;
+        if (code_obj.is_identical_to(isolate()->builtins()->LoadIC())) {
+          load_cache = true;
+        }
+        __ Call(code_obj, RelocInfo::CODE_TARGET, TypeFeedbackId::None(), al,
+                CAN_INLINE_TARGET_ADDRESS, load_cache);
       } else {
         __ add(ip, i.InputRegister(0),
                Operand(Code::kHeaderSize - kHeapObjectTag));
