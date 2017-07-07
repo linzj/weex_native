@@ -32,8 +32,21 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <wtf/Assertions.h>
+#if ENABLE(ANNOTATE_MAP) && defined(__ANDROID__)
+#include <sys/prctl.h>
+#endif // ANDROID
 
 namespace WTF {
+
+#if ENABLE(ANNOTATE_MAP) && defined(__ANDROID__)
+#define BIONIC_PR_SET_VMA               0x53564d41
+#define BIONIC_PR_SET_VMA_ANON_NAME     0
+static int __bionic_name_mem(void *addr, size_t len, const char *name)
+{
+    return prctl(BIONIC_PR_SET_VMA, BIONIC_PR_SET_VMA_ANON_NAME,
+                 addr, len, name);
+}
+#endif // ANDROID
 
 void* OSAllocator::reserveUncommitted(size_t bytes, Usage usage, bool writable, bool executable, bool includesGuardPages)
 {
@@ -47,6 +60,14 @@ void* OSAllocator::reserveUncommitted(size_t bytes, Usage usage, bool writable, 
     if (result == MAP_FAILED)
         CRASH();
     madvise(result, bytes, MADV_DONTNEED);
+#if ENABLE(ANNOTATE_MAP) && defined(__ANDROID__)
+    const char* name;
+    if (executable)
+        name = "jsc_jit";
+    else
+        name = "jsc_allocation";
+    __bionic_name_mem(result, bytes, name);
+#endif // ANDROID
 #else
     void* result = reserveAndCommit(bytes, usage, writable, executable, includesGuardPages);
 #if HAVE(MADV_FREE_REUSE)
@@ -111,6 +132,16 @@ void* OSAllocator::reserveAndCommit(size_t bytes, Usage usage, bool writable, bo
         else
             CRASH();
     }
+#if ENABLE(ANNOTATE_MAP) && defined(__ANDROID__)
+    if (result) {
+        const char* name;
+        if (executable)
+            name = "jsc_jit";
+        else
+            name = "jsc_allocation";
+        __bionic_name_mem(result, bytes, name);
+    }
+#endif // ANDROID
     if (result && includesGuardPages) {
         // We use mmap to remap the guardpages rather than using mprotect as
         // mprotect results in multiple references to the code region.  This
