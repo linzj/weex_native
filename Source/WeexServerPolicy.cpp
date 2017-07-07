@@ -61,7 +61,9 @@ static bpf_dsl::ResultExpr CrashSIGSYSPrctl()
 sandbox::bpf_dsl::ResultExpr WeexServerPolicy::EvaluateSyscall(int sysno) const
 {
     switch (sysno) {
+#if defined(__arm__)
     case __ARM_NR_cacheflush:
+#endif
     case __NR_clock_gettime:
     case __NR_exit:
     case __NR_exit_group:
@@ -77,6 +79,10 @@ sandbox::bpf_dsl::ResultExpr WeexServerPolicy::EvaluateSyscall(int sysno) const
     case __NR_sigaltstack:
     case __NR_brk:
     case __NR_mremap:
+    // for crash handler
+    case __NR_mincore:
+    // for crash handler read maps file.
+    case __NR_read:
     // for systrace support.
     case __NR_write:
     case __NR_writev:
@@ -88,7 +94,11 @@ sandbox::bpf_dsl::ResultExpr WeexServerPolicy::EvaluateSyscall(int sysno) const
     // compatible with logcat.
     case __NR_openat:
     case __NR_close:
+#if defined(__arm__)
     case __NR_socket:
+#elif defined(__i386__)
+    case __NR_socketcall:
+#endif
         return bpf_dsl::Error(EPERM);
     default:
         break;

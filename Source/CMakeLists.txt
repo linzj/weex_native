@@ -7,6 +7,7 @@ add_subdirectory(WTF)
 add_subdirectory(JavaScriptCore)
 add_subdirectory(IPC)
 add_subdirectory(Sandbox)
+add_subdirectory(CrashHandler)
 
 
 add_library(WeexSandBox
@@ -25,6 +26,13 @@ Sandbox log)
 
 #target_link_libraries(TestWeexServerPolicy
 #WeexSandBox)
+
+#add_executable(TestCrashHandler
+#TestCrashHandler.cpp
+#)
+#
+#target_link_libraries(TestCrashHandler
+#CrashHandler)
 
 include(WebKitCommon)
 
@@ -74,6 +82,7 @@ set(${WEEXJSSERVER_NAME}_LIBRARIES
 JavaScriptCore
 IPC
 WeexSandBox
+CrashHandler
 log)
 
 WEBKIT_FRAMEWORK(${WEEXJSSERVER_NAME})
