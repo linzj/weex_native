@@ -17,7 +17,7 @@
       ],
     },
     {
-        'target_name': 'weexv8',
+        'target_name': 'weexjsc',
         'type': 'shared_library',
         'dependencies': [
           '<(DEPTH)/src/v8.gyp:v8',

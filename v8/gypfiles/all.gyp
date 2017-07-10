@@ -9,7 +9,7 @@
       'type': 'none',
       'dependencies': [
         '../src/d8.gyp:d8',
-        '../alisrc/alisrc.gyp:weexv8',
+        '../alisrc/alisrc.gyp:weexjsc',
       ],
     }
   ]
