@@ -4863,6 +4863,7 @@ class Code: public HeapObject {
   V(FUNCTION)               \
   V(OPTIMIZED_FUNCTION)     \
   V(BYTECODE_HANDLER)       \
+  V(FAST_BYTECODE_FUNCTION) \
   V(STUB)                   \
   V(HANDLER)                \
   V(BUILTIN)                \

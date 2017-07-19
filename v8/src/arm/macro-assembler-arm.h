@@ -640,7 +640,10 @@ class MacroAssembler: public Assembler {
   // Get the actual activation frame alignment for target environment.
   static int ActivationFrameAlignment();
 
-  void LoadContext(Register dst, int context_chain_length);
+  inline void LoadContext(Register dst, int context_chain_length) {
+    LoadContext(dst, cp, context_chain_length);
+  }
+  void LoadContext(Register dst, Register mycp, int context_chain_length);
 
   // Load the global object from the current context.
   void LoadGlobalObject(Register dst) {

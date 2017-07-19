@@ -919,7 +919,9 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
   if (mode == Compiler::CONCURRENT) {
     if (GetOptimizedCodeLater(job.get())) {
       job.release();  // The background recompile job owns this now.
-      return isolate->builtins()->InOptimizationQueue();
+      // do fast code gen here.
+      FastCodeGenerator fcg(info);
+      return fcg.Generate();
     }
   } else {
     if (GetOptimizedCodeNow(job.get())) return info->code();
