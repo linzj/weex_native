@@ -110,12 +110,36 @@ void FastCodeGenerator::GenerateBody() {
 
 
 void FastCodeGenerator::GenerateEpilogue() {
+  __ bind(&return_);
   // Leave the frame (also dropping the register file).
   __ LeaveFrame(StackFrame::JAVA_SCRIPT);
 
   // Drop receiver + arguments.
   __ add(sp, sp, byte_code_array_->parameter_count() << kPointerSizeLog2, LeaveCC);
   __ Jump(lr);
+  __ bind(&truncate_slow_);
+  // r9 is the addr register, do not clobber.
+  Label not_heap_number, not_oddball;
+  __ ldr(r1, FieldMemOperand(r0, HeapObject::kMapOffset));
+  __ LoadRoot(r2, Heap::kHeapNumberMapRootIndex);
+  __ cmp(r1, r2);
+  __ b(&not_heap_number, ne);
+  __ vldr(d0, FieldMemOperand(r0, HeapNumber::kValueOffset));
+  __ vcvt_s32_f64(s0, d0);
+  __ vmov(r0, s0);
+  __ bx(lr);
+  __ bind(&not_heap_number);
+  __ ldrb(r2, FieldMemOperand(r1, Map::kInstanceTypeOffset));
+  __ cmp(r2, Operand(ODDBALL_TYPE));
+  __ b(&not_oddball, ne);
+  __ ldr(r0, FieldMemOperand(r0, Oddball::kToNumberOffset));
+  __ bx(lr);
+  __ bind(&not_oddball);
+  Callable callable = CodeFactory::NonNumberToNumber(isolate());
+  __ push(lr);
+  __ Call(callable.code());
+  __ pop(lr);
+  __ b(&truncate_slow_);
 }
 
 void FastCodeGenerator::VisitLdaZero() {
@@ -503,14 +527,6 @@ void FastCodeGenerator::VisitLdaLookupGlobalSlotInsideTypeof() {
 }
 
 void FastCodeGenerator::DoStaLookupSlot(LanguageMode language_mode) {
-  Node* value = __ GetAccumulator();
-  Node* index = __ BytecodeOperandIdx(0);
-  Node* name = __ LoadConstantPoolEntry(index);
-  Node* context = __ GetContext();
-  Node* result = __ CallRuntime(is_strict(language_mode)
-                                    ? Runtime::kStoreLookupSlot_Strict
-                                    : Runtime::kStoreLookupSlot_Sloppy,
-                                context, name, value);
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(0);
   __ mov(r1, Operand(name));
   __ Push(r1, kInterpreterAccumulatorRegister);
@@ -840,84 +856,383 @@ void FastCodeGenerator::VisitCallRuntimeForPair() {
   __ mov(r1, Operand(runtime_function));
   Callable callable = CodeFactory::InterpreterCEntry(isolate(), 2);
   __ Call(callable.code());
+  auto reg = bytecode_iterator().GetRegisterOperand(3);
+  __ str(r0, MemOperand(fp, reg.ToOperand() << kPointerSizeLog2));
+  __ str(r1, MemOperand(fp, (reg.ToOperand() << kPointerSizeLog2) - kPointerSize));
 }
 
 void FastCodeGenerator::VisitConstructWithSpread() {
+  Callable callable = CodeFactory::InterpreterPushArgsAndConstruct(
+      isolate(), InterpreterPushArgsMode::kWithFinalSpread);
+  // new target r3
+  __ mov(r3, kInterpreterAccumulatorRegister);
+  // argument count r0.
+  __ mov(r0, Operand(bytecode_iterator().GetUnsignedImmediateOperand(2)));
+  // constructor to call r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // allocation site feedback if available, undefined otherwisea r2
+  __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
+  // address of the first argument r4
+  __ add(r4, fp, bytecode_iterator().GetRegisterOperand(1).ToOperand() << kPointerSize);
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitInvokeIntrinsic() {
+  uint32_t function_id = bytecode_iterator().GetUnsignedImmediateOperand(0);
+  const Runtime::Function* function = Runtime::FunctionForId(static_cast<Runtime::FunctionId>(function_id));
+  ExternalReference runtime_function(static_cast<Runtime::FunctionId>(function_id), isolate_);
+  uint32_t args_count = bytecode_iterator().GetUnsignedImmediateOperand(2);
+  __ mov(r0, Operand(args_count));
+  __ add(r2, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand() << kPointerSize));
+  __ mov(r1, Operand(runtime_function));
+  Callable callable = CodeFactory::InterpreterCEntry(isolate(), 1);
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitConstruct() {
+  Node* active_function = __ GetAccumulator();
+  Node* context = __ GetContext();
+  Node* result = __ GetSuperConstructor(active_function, context);
+  Node* reg = __ BytecodeOperandReg(0);
+  __ StoreRegister(result, reg);
+  __ Dispatch();
+  Register active_function = r2;
+  Register scatch = r1;
+  Register super_constructor = r3;
+  Label is_constructor, done;
+  __ mov(active_function, kInterpreterAccumulatorRegister);
+  __ ldr(scratch, FieldMemOperand(active_function, HeapObject::kMapOffset));
+  __ ldr(super_constructor, FieldMemOperand(scratch, Map::kPrototypeOffset));
+  __ ldr(scratch, FieldMemOperand(super_constructor, HeapObject::kMapOffset));
+  __ ldrb(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset));
+  __ tst(scratch, Operand(1 << Map::kIsConstructor));
+  __ b(&is_constructor, ne);
+  // prototype is not constructor
+  __ Push(super_constructor, active_function);
+  __ CallRuntime(Runtime::kThrowNotSuperConstructor);
+  __ bind(&is_constructor);
+  StoreRegister(bytecode_iterator().GetRegisterOperand(0), super_constructor);
 }
 
 void FastCodeGenerator::VisitThrow() {
+  __ push(kInterpreterAccumulatorRegister);
+  __ CallRuntime(Runtime::kThrow);
 }
 
 void FastCodeGenerator::VisitReThrow() {
+  __ push(kInterpreterAccumulatorRegister);
+  __ CallRuntime(Runtime::kReThrow);
+}
+
+template <class BinaryOpCodeStub>
+void FastCodeGenerator::DoBinaryOp() {
+  // lhs r1
+  LoadRegister(bytecode_iterator.GetRegisterOperand(0), r1);
+  // rhs already inside r0
+  // slot id slot r4
+  uint32_t slot_id = bytecode_iterator().GetIndexOperand(1);
+  __ mov(r4, Operand(slot_id));
+  // vector r3
+  LoadFeedbackVector(r3);
+  BinaryOpCodeStub stub(isolate_);
+  __ Call(stub.GetCode());
 }
 
 void FastCodeGenerator::VisitAdd() {
+  BinaryOpCodeStub<AddWithFeedbackStub>()
 }
 
 void FastCodeGenerator::VisitSub() {
+  BinaryOpCodeStub<SubtractWithFeedbackStub>()
 }
 
 void FastCodeGenerator::VisitMul() {
+  BinaryOpCodeStub<MultiplyWithFeedbackStub>()
 }
 
 void FastCodeGenerator::VisitDiv() {
+  BinaryOpCodeStub<DivideWithFeedbackStub>()
 }
 
 void FastCodeGenerator::VisitMod() {
+  BinaryOpCodeStub<ModulusWithFeedbackStub>()
+}
+
+void FastCodeGenerator::TruncateToWord() {
+  Label done;
+  Register addr = r9;
+  __ ldr(r0, MemOperand(addr));
+  __ SmiTst(r0);
+  __ mov(r0, Operand::SmiUntag(r0), LeaveCC, eq);
+  __ str(r0, MemOperand(addr), eq);
+  __ b(&done, eq);
+  __ bl(&truncate_slow_);
+  __ str(r0, MemOperand(addr));
+  __ bind(&done);
+}
+
+void FastCodeGenerator::ChangeInt32ToTagged(Register result) {
+  Label done, slowalloc;
+  __ SmiTag(result, SetCC); 
+  __ b(&done, vc);
+  // not a smi
+  Register heap_map = r0;
+  __ LoadRegister(heap_map, Heap::kHeapNumberMapRootIndex);
+  __ vmov(s0, result);
+  __ vcvt_f64_s32(d0, s0);
+  __ AllocateHeapNumberWithValue(result, d0, r3, r2, heap_map, &slowalloc);
+  __ b(&done);
+  __ bind(&slowalloc);
+  __ CallRuntime(Runtime::kAllocateHeapNumber);
+  __ vstr(d0, FieldMemOperand(r0, HeapNumber::kValueOffset));
+  __ mov(result, r0);
+  __ bind(&done);
+}
+
+void FastCodeGenerator::DoBitwiseBinaryOp(Token::Value bitwise_op) {
+  Register lhs = r1;
+  Register rhs = kInterpreterAccumulatorRegister;
+  Register result = r1;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), lhs);
+  uint32_t slot_index = bytecode_iterator().GetIndexOperand(1);
+  // FIXME: wrong code.
+  __ Push(lhs, rhs);
+  __ add(r9, sp, Operand(0));
+  TruncateToWord();
+  __ add(r9, sp, Operand(4));
+  TruncateToWord();
+  __ Pop(lhs, rhs);
+
+  switch (bitwise_op) {
+    case Token::BIT_OR: {
+      __ orr(result, lhs, Operand(rhs));
+    } break;
+    case Token::BIT_AND: {
+      __ and_(result, lhs, Operand(rhs));
+    } break;
+    case Token::BIT_XOR: {
+      __ eor(result, lhs, Operand(rhs));
+    } break;
+    case Token::SHL: {
+      __ and_(rhs, rhs, Operand(0x1f));
+      __ lsl(result, lhs, Operand(rhs));
+    } break;
+    case Token::SHR: {
+      __ and_(rhs, rhs, Operand(0x1f));
+      __ lsr(result, lhs, Operand(rhs));
+    } break;
+    case Token::SAR: {
+      __ and_(rhs, rhs, Operand(0x1f));
+      __ sar(result, lhs, Operand(rhs));
+    } break;
+    default:
+      UNREACHABLE();
+  }
+  ChangeInt32ToTagged(result);
+  __ mov(kInterpreterAccumulatorRegister, result);
 }
 
 void FastCodeGenerator::VisitBitwiseOr() {
+  DoBitwiseBinaryOp(Token::BIT_OR);
 }
 
 void FastCodeGenerator::VisitBitwiseXor() {
+  DoBitwiseBinaryOp(Token::BIT_XOR);
 }
 
 void FastCodeGenerator::VisitBitwiseAnd() {
+  DoBitwiseBinaryOp(Token::BIT_AND);
 }
 
 void FastCodeGenerator::VisitShiftLeft() {
+  DoBitwiseBinaryOp(Token::SHL);
+
 }
 
 void FastCodeGenerator::VisitShiftRight() {
+  DoBitwiseBinaryOp(Token::SAR);
 }
 
 void FastCodeGenerator::VisitShiftRightLogical() {
+  DoBitwiseBinaryOp(Token::SHR);
 }
 
 void FastCodeGenerator::VisitAddSmi() {
+  Label slowpath, done;
+  Register left = r1;
+  int right = bytecode_iterator().GetImmediateOperand(0);
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), left);
+  __ SmiTst(left);
+  __ b(&slowpath, ne);
+  // left is a smi here
+  __ add(kInterpreterAccumulatorRegister, left, Operand(Smi::FromInt(right)), SetCC);
+  __ b(&done, vc);
+  __ bind(&slowpath);
+
+  // lhs r1
+  // rhs r0
+  __ mov(r0, Operand(Smi::FromInt(right)));
+  // slot id slot r4
+  uint32_t slot_id = bytecode_iterator().GetIndexOperand(2);
+  __ mov(r4, Operand(slot_id));
+  // vector r3
+  LoadFeedbackVector(r3);
+  AddWithFeedbackStub stub(isolate_);
+  __ Call(stub.GetCode());
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitSubSmi() {
+  Label slowpath, done;
+  Register left = r1;
+  int right = bytecode_iterator().GetImmediateOperand(0);
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), left);
+  __ SmiTst(left);
+  __ b(&slowpath, ne);
+  // left is a smi here
+  __ sub(kInterpreterAccumulatorRegister, left, Operand(Smi::FromInt(right)), SetCC);
+  __ b(&done, vc);
+  __ bind(&slowpath);
+
+  // lhs r1
+  // rhs r0
+  __ mov(r0, Operand(Smi::FromInt(right)));
+  // slot id slot r4
+  uint32_t slot_id = bytecode_iterator().GetIndexOperand(2);
+  __ mov(r4, Operand(slot_id));
+  // vector r3
+  LoadFeedbackVector(r3);
+  SubtractWithFeedbackStub stub(isolate_);
+  __ Call(stub.GetCode());
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitBitwiseOrSmi() {
+  Register lhs = r0;
+  Register word_result = r0;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
+  __ push(lhs);
+  __ add(r9, sp, Operand(0));
+  TruncateToWord();
+  __ pop(lhs);
+  __ eor(word_result, lhs, Operand(bytecode_iterator().GetImmediateOperand(0)));
+  ChangeInt32ToTagged(word_result);
 }
 
 void FastCodeGenerator::VisitBitwiseAndSmi() {
+  Register lhs = r0;
+  Register word_result = r0;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
+  __ push(lhs);
+  __ add(r9, sp, Operand(0));
+  TruncateToWord();
+  __ pop(lhs);
+  __ and_(word_result, lhs, Operand(bytecode_iterator().GetImmediateOperand(0)));
+  ChangeInt32ToTagged(word_result);
 }
 
 void FastCodeGenerator::VisitShiftLeftSmi() {
+  Register lhs = r0;
+  Register word_result = r0;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
+  __ push(lhs);
+  __ add(r9, sp, Operand(0));
+  TruncateToWord();
+  __ pop(lhs);
+  __ lsl(word_result, lhs, Operand(bytecode_iterator().GetImmediateOperand(0) & 0x1f));
+  ChangeInt32ToTagged(word_result);
 }
 
 void FastCodeGenerator::VisitShiftRightSmi() {
+  Register lhs = r0;
+  Register word_result = r0;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
+  __ push(lhs);
+  __ add(r9, sp, Operand(0));
+  TruncateToWord();
+  __ pop(lhs);
+  __ sar(word_result, lhs, Operand(bytecode_iterator().GetImmediateOperand(0) & 0x1f));
+  ChangeInt32ToTagged(word_result);
 }
 
 void FastCodeGenerator::VisitInc() {
+  // lhs r1
+  __ mov(r1, Operand(Smi::FromInt(1)));
+  // rhs already inside r0
+  // slot id slot r4
+  uint32_t slot_id = bytecode_iterator().GetIndexOperand(0);
+  __ mov(r4, Operand(slot_id));
+  // vector r3
+  LoadFeedbackVector(r3);
+  AddWithFeedbackStub stub(isolate_);
+  __ Call(stub.GetCode());
 }
 
 void FastCodeGenerator::VisitDec() {
+  // lhs r1
+  __ mov(r1, Operand(Smi::FromInt(-1)));
+  // rhs already inside r0
+  // slot id slot r4
+  uint32_t slot_id = bytecode_iterator().GetIndexOperand(0);
+  __ mov(r4, Operand(slot_id));
+  // vector r3
+  LoadFeedbackVector(r3);
+  AddWithFeedbackStub stub(isolate_);
+  __ Call(stub.GetCode());
 }
 
 void FastCodeGenerator::VisitLogicalNot() {
+  __ LoadRoot(r1, Heap::kTrueValueRootIndex);
+  __ LoadRoot(r2, Heap::kFalseValueRootIndex);
+  __ cmp(kInterpreterAccumulatorRegister, r1);
+  __ mov(kInterpreterAccumulatorRegister, r2, LeaveCC, eq);
+  __ mov(kInterpreterAccumulatorRegister, r1, LeaveCC, ne);
+}
+
+void FastCodeGenerator::BranchIfToBooleanIsTrue(Label* if_true,
+                                                Label* if_false) {
+  Register value = r1;
+  Label if_valueisnotsmi,
+      if_valueisheapnumber;
+
+  // Rule out false {value}.
+  __ LoadRoot(r2, Heap::kFalseValueRootIndex);
+  __ cmp(value, r2);
+  __ b(if_false, eq);
+  __ SmiTst(value);
+  __ b(&if_valueisnotsmi, ne);
+  // if_valueissmi
+  __ cmp(value, Operand(Smi::FromInt(0)));
+  __ b(if_false, eq);
+  __ b(if_true);
+  __ bind(&if_valueisnotsmi);
+  __ LoadRoot(r2, Heap::kEmptyStringRootIndex);
+  __ cmp(value, r2);
+  __ b(if_false, eq);
+  __ ldr(r2, FieldMemOperand(r1, HeapObject::kMapOffset));
+  __ ldr(r3, FieldMemOperand(r2, Map::kBitFieldOffset));
+  __ tst(r3, Operand(1 << Map::kIsUndetectable));
+  __ b(if_false, ne);
+  __ LoadRoot(r3, Heap::kHeapNumberMapRootIndex);
+  __ cmp(r2, r3);
+  __ b(if_true, ne);
+  __ vldr(d0, FieldMemOperand(r1, HeapNumber::kValueOffset));
+  __ vabs(d0, d0);
+  __ VFPCompareAndSetFlags(d0, 0.0);
+  __ b(if_true, lt);
+  __ b(if_false);
 }
 
 void FastCodeGenerator::VisitToBooleanLogicalNot() {
+  Label if_true, if_false, done;
+  __ mov(r1, kInterpreterAccumulatorRegister);
+  BranchIfToBooleanIsTrue(&if_true, &if_false);
+  __ bind(&if_true);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex);
+  __ b(&done);
+  __ bind(&if_false);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitTypeOf() {
@@ -1036,6 +1351,7 @@ void FastCodeGenerator::VisitSetPendingMessage() {
 }
 
 void FastCodeGenerator::VisitReturn() {
+  __ b(&return_);
 }
 
 void FastCodeGenerator::VisitDebugger() {

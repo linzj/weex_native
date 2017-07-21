@@ -49,11 +49,21 @@ class FastCodeGenerator {
   void DoStoreIC(Callable ic);
   void DoKeyedStoreIC(Callable ic);
   void DoJSCall(TailCallMode tail_call_mode);
+  template <class BinaryOpCodeStub>
+  void DoBinaryOp();
+
+  void DoBitwiseBinaryOp(Token::Value bitwise_op);
+  void TruncateToWord(Register in_and_out);
+  void ChangeInt32ToTagged(Register result);
+  void BranchIfToBooleanIsTrue(Label* if_true,
+          Label* if_false);
 
   MacroAssembler masm_;
   CompilationInfo* info_;
   Isolate* isolate_;
   Handle<BytecodeArray> byte_code_array_;
+  Label return_;
+  Label truncate_slow_;
   const interpreter::BytecodeArrayIterator* bytecode_iterator_;
 };
 
