@@ -890,28 +890,19 @@ void FastCodeGenerator::VisitInvokeIntrinsic() {
 }
 
 void FastCodeGenerator::VisitConstruct() {
-  Node* active_function = __ GetAccumulator();
-  Node* context = __ GetContext();
-  Node* result = __ GetSuperConstructor(active_function, context);
-  Node* reg = __ BytecodeOperandReg(0);
-  __ StoreRegister(result, reg);
-  __ Dispatch();
-  Register active_function = r2;
-  Register scatch = r1;
-  Register super_constructor = r3;
-  Label is_constructor, done;
-  __ mov(active_function, kInterpreterAccumulatorRegister);
-  __ ldr(scratch, FieldMemOperand(active_function, HeapObject::kMapOffset));
-  __ ldr(super_constructor, FieldMemOperand(scratch, Map::kPrototypeOffset));
-  __ ldr(scratch, FieldMemOperand(super_constructor, HeapObject::kMapOffset));
-  __ ldrb(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset));
-  __ tst(scratch, Operand(1 << Map::kIsConstructor));
-  __ b(&is_constructor, ne);
-  // prototype is not constructor
-  __ Push(super_constructor, active_function);
-  __ CallRuntime(Runtime::kThrowNotSuperConstructor);
-  __ bind(&is_constructor);
-  StoreRegister(bytecode_iterator().GetRegisterOperand(0), super_constructor);
+  Callable callable = CodeFactory::InterpreterPushArgsAndConstruct(
+      isolate(), InterpreterPushArgsMode::kOther);
+  // new target r3
+  __ mov(r3, kInterpreterAccumulatorRegister);
+  // argument count r0.
+  __ mov(r0, Operand(bytecode_iterator().GetUnsignedImmediateOperand(2)));
+  // constructor to call r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // allocation site feedback if available, undefined otherwisea r2
+  __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
+  // address of the first argument r4
+  __ add(r4, fp, bytecode_iterator().GetRegisterOperand(1).ToOperand() << kPointerSize);
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitThrow() {
@@ -1236,60 +1227,179 @@ void FastCodeGenerator::VisitToBooleanLogicalNot() {
 }
 
 void FastCodeGenerator::VisitTypeOf() {
+  // r3 is the only input.
+  __ mov(r3, kInterpreterAccumulatorRegister);
+  Callable callable = CodeFactory::TypeOf(isolate_);
+  __ Call(callable.code());
+}
+
+void FastCodeGenerator::DoDelete(Runtime::FunctionId function_id) {
+  LoadRegister(bytecode_iterator.GetRegisterOperand(0), r1);
+  __ push(r1);
+  __ push(kInterpreterAccumulatorRegister);
+  __ CallRuntime(function_id);
 }
 
 void FastCodeGenerator::VisitDeletePropertyStrict() {
+  DoDelete(Runtime::kDeleteProperty_Strict);
 }
 
 void FastCodeGenerator::VisitDeletePropertySloppy() {
+  DoDelete(Runtime::kDeleteProperty_Sloppy);
 }
 
 void FastCodeGenerator::VisitGetSuperConstructor() {
+  Register active_function = r2;
+  Register scratch = r1;
+  Register super_constructor = r3;
+  Label is_constructor, done;
+  __ mov(active_function, kInterpreterAccumulatorRegister);
+  __ ldr(scratch, FieldMemOperand(active_function, HeapObject::kMapOffset));
+  __ ldr(super_constructor, FieldMemOperand(scratch, Map::kPrototypeOffset));
+  __ ldr(scratch, FieldMemOperand(super_constructor, HeapObject::kMapOffset));
+  __ ldrb(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset));
+  __ tst(scratch, Operand(1 << Map::kIsConstructor));
+  __ b(&is_constructor, ne);
+  // prototype is not constructor
+  __ Push(super_constructor, active_function);
+  __ CallRuntime(Runtime::kThrowNotSuperConstructor);
+  __ bind(&is_constructor);
+  StoreRegister(bytecode_iterator().GetRegisterOperand(0), super_constructor);
 }
 
 void FastCodeGenerator::VisitTestEqual() {
+  Callable callable = CodeFactory::Equal(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestNotEqual() {
+  Callable callable = CodeFactory::NotEqual(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestEqualStrict() {
+  Callable callable = CodeFactory::StrictEqual(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestLessThan() {
+  Callable callable = CodeFactory::LessThan(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestGreaterThan() {
+  Callable callable = CodeFactory::GreaterThan(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestLessThanOrEqual() {
+  Callable callable = CodeFactory::LessThanOrEqual(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestGreaterThanOrEqual() {
+  Callable callable = CodeFactory::GreaterThanOrEqual(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestIn() {
+  Callable callable = CodeFactory::HasProperty(isolate_);
+  // object in r1
+  __ mov(r1, kInterpreterAccumulatorRegister);
+  // key in r0
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestInstanceOf() {
+  Callable callable = CodeFactory::GreaterThanOrEqual(isolate_);
+  // lhs in r1
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  // rhs already in r0
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitTestUndetectable() {
+  Label not_equal, done;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  __ SmiTst(r1);
+  __ b(&not_equal, eq);
+  __ ldr(r1, FieldMemOperand(r1, HeapObject::kMapOffset));
+  __ tst(r1, Operand(1 << Map::kIsUndetectable));
+  __ b(&not_equal, ne);
+  __ LoadRegister(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
+  __ b(&done);
+
+  __ bind(&not_equal);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex);
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitTestNull() {
+  Label equal, done;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  __ LoadRoot(r0, Heap::kNullValueRootIndex);
+  __ cmp(r0, r1);
+  __ b(&equal, eq);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex);
+  __ b(&done);
+  __ bind(&equal);
+
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitTestUndefined() {
+  Label equal, done;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
+  __ LoadRoot(r0, Heap::kUndefinedValueRootIndex);
+  __ cmp(r0, r1);
+  __ b(&equal, eq);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex);
+  __ b(&done);
+  __ bind(&equal);
+
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitToName() {
+  Callable callable = CodeFactory::ToName(isolate_);
+  __ Call(callable.code());
+  StoreRegister(bytecode_iterator().GetRegisterOperand(0), r0);
 }
 
 void FastCodeGenerator::VisitToObject() {
+  Callable callable = CodeFactory::ToObject(isolate_);
+  __ Call(callable.code());
+  StoreRegister(bytecode_iterator().GetRegisterOperand(0), r0);
 }
 
 void FastCodeGenerator::VisitToNumber() {
+  Callable callable = CodeFactory::ToNumber(isolate_);
+  __ Call(callable.code());
+  StoreRegister(bytecode_iterator().GetRegisterOperand(0), r0);
 }
 
 void FastCodeGenerator::VisitJump() { 

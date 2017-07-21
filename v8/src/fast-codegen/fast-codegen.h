@@ -57,6 +57,7 @@ class FastCodeGenerator {
   void ChangeInt32ToTagged(Register result);
   void BranchIfToBooleanIsTrue(Label* if_true,
           Label* if_false);
+  void DoDelete(Runtime::FunctionId function_id);
 
   MacroAssembler masm_;
   CompilationInfo* info_;
