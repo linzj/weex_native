@@ -1347,7 +1347,7 @@ void FastCodeGenerator::VisitTestUndetectable() {
   __ b(&not_equal, eq);
   __ ldr(r1, FieldMemOperand(r1, HeapObject::kMapOffset));
   __ tst(r1, Operand(1 << Map::kIsUndetectable));
-  __ b(&not_equal, ne);
+  __ b(&not_equal, eq);
   __ LoadRegister(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
   __ b(&done);
 
@@ -1361,27 +1361,16 @@ void FastCodeGenerator::VisitTestNull() {
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   __ LoadRoot(r0, Heap::kNullValueRootIndex);
   __ cmp(r0, r1);
-  __ b(&equal, eq);
-  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex);
-  __ b(&done);
-  __ bind(&equal);
-
-  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
-  __ bind(&done);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex, ne);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex, eq);
 }
 
 void FastCodeGenerator::VisitTestUndefined() {
-  Label equal, done;
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   __ LoadRoot(r0, Heap::kUndefinedValueRootIndex);
   __ cmp(r0, r1);
-  __ b(&equal, eq);
-  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex);
-  __ b(&done);
-  __ bind(&equal);
-
-  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex);
-  __ bind(&done);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex, ne);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex, eq);
 }
 
 void FastCodeGenerator::VisitToName() {
@@ -1465,33 +1454,90 @@ void FastCodeGenerator::VisitReturn() {
 }
 
 void FastCodeGenerator::VisitDebugger() {
+  Callable callable = CodeFactory::HandleDebuggerStatement(isolate_);
+  __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitForInPrepare() {
+  Label call_runtime, done;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
+  __ CheckEnumCache(&call_runtime);
+
+  __ ldr(r1, FieldMemOperand(r0, DescriptorArray::kEnumCacheOffset));
+  __ ldr(r1, FieldMemOperand(r1, DescriptorArray::kEnumCacheBridgeCacheOffset));
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
+  __ ldr(r0, FieldMemOperand(r0, HeapObject::kMapOffset));
+  auto reg = bytecode_iterator().GetRegisterOperand(1);
+  __ mov(r2, r0);
+  __ EnumLength(r2, r2);
+  __ b(&done);
+  __ bind(&call_runtime)
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
+  __ push(r0);
+  __ CallRuntime(Runtime::kForInPrepare);
+  __ bind(&done);
+  __ str(r0, MemOperand(fp, reg.ToOperand() << kPointerSizeLog2));
+  __ str(r1, MemOperand(fp, (reg.ToOperand() << kPointerSizeLog2) - kPointerSizeLog2));
+  __ str(r2, MemOperand(fp, (reg.ToOperand() << kPointerSizeLog2) - 2 * kPointerSizeLog2));
 }
 
 void FastCodeGenerator::VisitForInContinue() {
+  Register index = r1;
+  Register cache_length = r2
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), index);
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), cache_length);
+  __ cmp(index, cache_length);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kTrueValueRootIndex, ne);
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kFalseValueRootIndex, eq);
 }
 
 void FastCodeGenerator::VisitForInNext() { 
+  Label done;
+  Register cache_array = r0;
+  Register cache_type = r2;
+  Register receiver = r1;
+  Register receiver_map = r3;
+  Register key = kInterpreterAccumulatorRegister;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), receiver);
+  __ ldr(receiver_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
+  __ ldrd(cache_array, cache_type, MemOperand(fp, (bytecode_iterator().GetRegisterOperand(2).ToOperand() << kPointerSizeLog2) - kPointerSize));
+  LoadFixedArrayElement(cache_array, key, bytecode_iterator().GetIndexOperand(1), 0);
+  __ cmp(receiver_map, cache_type);
+  __ b(&done, eq);
+  Callable callable = CodeFactory::ForInFilter(assembler->isolate());
+  // key already in r0
+  // receiver already in r1
+  __ Call(callable);
+  __ bind(&done);
 }
 
 void FastCodeGenerator::VisitForInStep() {
+  Register index = r0;
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), index);
+  __ add(kInterpreterAccumulatorRegister, index, Operand(Smi::FromInt(1)));
 }
 
 void FastCodeGenerator::VisitSuspendGenerator() {
+  UNREACHABLE();
 }
 
 void FastCodeGenerator::VisitResumeGenerator() {
+  UNREACHABLE();
 }
 
 void FastCodeGenerator::VisitWide() {
+  // Consumed by the BytecodeArrayIterator.
+  UNREACHABLE();
 }
 
 void FastCodeGenerator::VisitExtraWide() {
+  // Consumed by the BytecodeArrayIterator.
+  UNREACHABLE();
 }
 
 void FastCodeGenerator::VisitIllegal() {
+  // Not emitted in valid bytecode.
+  UNREACHABLE();
 }
 
 void FastCodeGenerator::VisitNop() {
