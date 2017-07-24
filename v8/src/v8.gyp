@@ -895,6 +895,8 @@
         'factory.h',
         'fast-accessor-assembler.cc',
         'fast-accessor-assembler.h',
+        'fast-codegen/arm/fast-codegen-arm.cc',
+        'fast-codegen/label-recorder.cc',
         'fast-dtoa.cc',
         'fast-dtoa.h',
         'feedback-vector-inl.h',

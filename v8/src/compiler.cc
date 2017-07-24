@@ -23,6 +23,7 @@
 #include "src/crankshaft/hydrogen.h"
 #include "src/debug/debug.h"
 #include "src/debug/liveedit.h"
+#include "src/fast-codegen/fast-codegen.h"
 #include "src/frames-inl.h"
 #include "src/full-codegen/full-codegen.h"
 #include "src/globals.h"
