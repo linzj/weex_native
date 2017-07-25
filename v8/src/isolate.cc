@@ -1302,6 +1302,7 @@ Object* Isolate::UnwindAndFindHandler() {
         break;
       }
     }
+    // FIXME: add fast codgen support here.
 
     // For JavaScript frames we are guaranteed not to find a handler.
     if (frame->is_java_script() && catchable_by_js) {

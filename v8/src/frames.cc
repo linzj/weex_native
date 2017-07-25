@@ -478,6 +478,8 @@ StackFrame::Type StackFrame::ComputeType(const StackFrameIteratorBase* iterator,
             return OPTIMIZED;
           }
           return BUILTIN;
+        case Code::FAST_BYTECODE_FUNCTION:
+          return FASTCODEGEN;
         case Code::FUNCTION:
           return JAVA_SCRIPT;
         case Code::OPTIMIZED_FUNCTION:
@@ -821,6 +823,7 @@ void StandardFrame::IterateCompiledFrame(ObjectVisitor* v) const {
       case OPTIMIZED:
       case INTERPRETED:
       case BUILTIN:
+      case FASTCODEGEN:
         // These frame types have a context, but they are actually stored
         // in the place on the stack that one finds the frame type.
         UNREACHABLE();

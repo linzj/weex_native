@@ -55,7 +55,7 @@ class LabelRecorder {
   void RecordJumpLoop(const interpreter::BytecodeArrayIterator& iterator);
 
   void RecordFromImm(const interpreter::BytecodeArrayIterator& iterator,
-                     int index);
+                     int index, bool backward = false);
   void RecordFromConstant(const interpreter::BytecodeArrayIterator& iterator,
                           int index);
   void Record(int offset);

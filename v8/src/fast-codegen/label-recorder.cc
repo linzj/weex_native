@@ -11,7 +11,7 @@ LabelRecorder::LabelRecorder(Handle<BytecodeArray> bytecode_array)
 
 void LabelRecorder::Record() {
   interpreter::BytecodeArrayIterator iterator(bytecode_array_);
-  for (; iterator.done(); iterator.Advance()) {
+  for (; !iterator.done(); iterator.Advance()) {
     switch (iterator.current_bytecode()) {
       case interpreter::Bytecode::kJump:
         RecordJump(iterator);
@@ -175,12 +175,14 @@ void LabelRecorder::RecordJumpIfUndefinedConstant(
 
 void LabelRecorder::RecordJumpLoop(
     const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
+  RecordFromImm(iterator, 0, true);
 }
 
 void LabelRecorder::RecordFromImm(
-    const interpreter::BytecodeArrayIterator& iterator, int index) {
+    const interpreter::BytecodeArrayIterator& iterator, int index, bool backward) {
   int offset = iterator.GetUnsignedImmediateOperand(index);
+  if (backward)
+    offset = -offset;
   Record(iterator.current_offset() + offset);
 }
 

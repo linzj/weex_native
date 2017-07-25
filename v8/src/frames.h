@@ -102,6 +102,7 @@ class StackHandler BASE_EMBEDDED {
   V(JS_TO_WASM, JsToWasmFrame)                           \
   V(WASM_INTERPRETER_ENTRY, WasmInterpreterEntryFrame)   \
   V(INTERPRETED, InterpretedFrame)                       \
+  V(FASTCODEGEN, FastCodegenFrame)                       \
   V(STUB, StubFrame)                                     \
   V(STUB_FAILURE_TRAMPOLINE, StubFailureTrampolineFrame) \
   V(INTERNAL, InternalFrame)                             \
@@ -523,7 +524,8 @@ class StackFrame BASE_EMBEDDED {
   bool is_java_script() const {
     Type type = this->type();
     return (type == JAVA_SCRIPT) || (type == OPTIMIZED) ||
-           (type == INTERPRETED) || (type == BUILTIN);
+           (type == INTERPRETED) || (type == BUILTIN) ||
+           (type == FASTCODEGEN);
   }
   bool is_wasm() const {
     Type type = this->type();
@@ -1217,6 +1219,17 @@ class InterpretedFrame : public JavaScriptFrame {
   inline explicit InterpretedFrame(StackFrameIteratorBase* iterator);
 
   Address GetExpressionAddress(int n) const override;
+
+ private:
+  friend class StackFrameIteratorBase;
+};
+
+class FastCodegenFrame: public JavaScriptFrame {
+ public:
+  Type type() const override { return FASTCODEGEN; }
+
+ protected:
+  inline explicit FastCodegenFrame(StackFrameIteratorBase* iterator);
 
  private:
   friend class StackFrameIteratorBase;

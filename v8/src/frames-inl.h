@@ -245,6 +245,9 @@ inline InterpretedFrame::InterpretedFrame(StackFrameIteratorBase* iterator)
     : JavaScriptFrame(iterator) {}
 
 
+inline FastCodegenFrame::FastCodegenFrame(StackFrameIteratorBase* iterator)
+    : JavaScriptFrame(iterator) {}
+
 inline ArgumentsAdaptorFrame::ArgumentsAdaptorFrame(
     StackFrameIteratorBase* iterator) : JavaScriptFrame(iterator) {
 }

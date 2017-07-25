@@ -28,14 +28,16 @@ Handle<Code> FastCodeGenerator::Generate() {
   Object* maybe_byte_code_array = info()->shared_info()->function_data();
   DCHECK(maybe_byte_code_array->IsBytecodeArray());
   bytecode_array_ = handle(BytecodeArray::cast(maybe_byte_code_array));
+  FrameScope frame_scope(&masm_, StackFrame::MANUAL);
   GeneratePrologue();
   GenerateBody();
   GenerateEpilogue();
 
   CodeDesc desc;
   masm_.GetCode(&desc);
-  Handle<Code> code = isolate->factory()->NewCode(desc, info()->code_flags(),
-                                                  masm_.CodeObject());
+  Handle<Code> code = isolate->factory()->NewCode(
+      desc, Code::ComputeFlags(Code::FAST_BYTECODE_FUNCTION),
+      masm_.CodeObject());
   return handle_scope.CloseAndEscape(code);
 }
 
@@ -59,7 +61,6 @@ void FastCodeGenerator::GeneratePrologue() {
   // Open a frame scope to indicate that there is a frame on the stack.  The
   // MANUAL indicates that the scope shouldn't actually generate code to set up
   // the frame (that is done below).
-  FrameScope frame_scope(&masm_, StackFrame::MANUAL);
   __ PushStandardFrame(r1);
 
   // Get the bytecode array from the function object (or from the DebugInfo if
@@ -90,6 +91,7 @@ void FastCodeGenerator::GeneratePrologue() {
     __ LoadRoot(r2, Heap::kRealStackLimitRootIndex);
     __ cmp(r9, Operand(r2));
     __ b(hs, &ok);
+    GetContext(cp);
     __ CallRuntime(Runtime::kThrowStackOverflow);
     __ bind(&ok);
 
@@ -154,6 +156,7 @@ void FastCodeGenerator::GenerateEpilogue() {
   __ bind(&not_oddball);
   Callable callable = CodeFactory::NonNumberToNumber(isolate());
   __ push(lr);
+  GetContext(cp);
   __ Call(callable.code());
   __ pop(lr);
   __ b(&truncate_slow_);
@@ -181,8 +184,22 @@ void FastCodeGenerator::LoadFixedArrayElement(Register array, Register to,
   int32_t header_size = FixedArray::kHeaderSize + additional_offset;
   uint32_t offset =
       ElementOffsetFromIndex(index, FAST_HOLEY_ELEMENTS, header_size);
-  return __ Load(to, FieldMemOperand(array, offset),
-                 Representation::HeapObject());
+  __ Load(to, FieldMemOperand(array, offset), Representation::HeapObject());
+}
+
+void FastCodeGenerator::LoadFixedArrayElementSmiIndex(Register array, Register to,
+                                              Register index,
+                                              int additional_offset) {
+  int32_t header_size = FixedArray::kHeaderSize + additional_offset;
+  int element_size_shift = ElementsKindToShiftSize(FAST_HOLEY_ELEMENTS);
+  int const kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
+  element_size_shift -= kSmiShiftBits;
+  Register offset = index;
+  __ lsl(offset, index, Operand(element_size_shift));
+  __ add(offset, array, Operand(offset));
+  __ bic(offset, offset, Operand(1));
+  __ add(offset, offset, Operand(header_size));
+  __ Load(to, MemOperand(offset), Representation::HeapObject());
 }
 
 void FastCodeGenerator::VisitLdaConstant() {
@@ -267,14 +284,18 @@ void FastCodeGenerator::LoadWeakCellValue(Register weak_cell, Register to,
   }
 }
 
-void FastCodeGenerator::GetContext(Register out) { __ mov(out, cp); }
+void FastCodeGenerator::GetContext(Register out) {
+  LoadRegister(interpreter::Register::current_context(), out);
+}
 
-void FastCodeGenerator::SetContext(Register in) { __ mov(cp, in); }
+void FastCodeGenerator::SetContext(Register in) {
+  StoreRegister(interpreter::Register::current_context(), in);
+}
 
 void FastCodeGenerator::BuildLoadGlobal(Register out, int slot_operand_index,
                                         int name_operand_index,
                                         TypeofMode typeof_mode) {
-  Register feedback_vector_reg = r0;
+  Register feedback_vector_reg = r1;
   LoadFeedbackVector(feedback_vector_reg);
   uint32_t feedback_slot =
       bytecode_iterator().GetIndexOperand(slot_operand_index);
@@ -336,11 +357,10 @@ void FastCodeGenerator::BuildLoadGlobal(Register out, int slot_operand_index,
 
     __ bind(&miss);
     {
-      Register context_reg = r1;
+      Register context_reg = cp;
       Register name_reg = r1;
       Register smi_slot_reg = r1;
       GetContext(context_reg);
-      __ push(context_reg);
 
       Handle<Object> name =
           bytecode_iterator().GetConstantForIndexOperand(name_operand_index);
@@ -384,6 +404,7 @@ void FastCodeGenerator::DoStaGlobal(const Callable& ic) {
   __ mov(StoreWithVectorDescriptor::SlotRegister(),
          Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(1))));
   LoadFeedbackVector(StoreWithVectorDescriptor::VectorRegister());
+  GetContext(cp);
   __ Call(ic.code());
 }
 
@@ -411,14 +432,15 @@ void FastCodeGenerator::VisitStaDataPropertyInLiteral() {
   LoadFeedbackVector(r1);
   __ push(r1);
 
+  GetContext(cp);
   __ CallRuntime(Runtime::kDefineDataPropertyInLiteral);
 }
 
 void FastCodeGenerator::VisitLdaContextSlot() {
   Register context_reg = r0;
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), context_reg);
-  __ LoadContext(context_reg, context_reg,
-                 bytecode_iterator().GetUnsignedImmediateOperand(2));
+  uint32_t level = bytecode_iterator().GetUnsignedImmediateOperand(2);
+  if (level > 0) __ LoadContext(context_reg, context_reg, level);
   __ ldr(
       kInterpreterAccumulatorRegister,
       ContextMemOperand(context_reg, bytecode_iterator().GetIndexOperand(1)));
@@ -457,6 +479,7 @@ void FastCodeGenerator::DoLdaLookupSlot(Runtime::FunctionId function_id) {
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(0);
   __ mov(r1, Operand(name));
   __ push(r1);
+  GetContext(cp);
   __ CallRuntime(function_id);
 }
 
@@ -487,7 +510,7 @@ void FastCodeGenerator::GotoIfHasContextExtensionUpToDepth(
 
 void FastCodeGenerator::DoLdaLookupContextSlot(
     Runtime::FunctionId function_id) {
-  Register context_reg = r1;
+  Register context_reg = cp;
   uint32_t slot_index = bytecode_iterator().GetIndexOperand(1);
   uint32_t depth = bytecode_iterator().GetUnsignedImmediateOperand(2);
   Label slowpath, done;
@@ -537,6 +560,7 @@ void FastCodeGenerator::DoLdaLookupGlobalSlot(Runtime::FunctionId function_id) {
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(0);
   __ mov(r1, Operand(name));
   __ push(r1);
+  GetContext(cp);
   __ CallRuntime(function_id);
   __ bind(&done);
 }
@@ -553,6 +577,7 @@ void FastCodeGenerator::DoStaLookupSlot(LanguageMode language_mode) {
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(0);
   __ mov(r1, Operand(name));
   __ Push(r1, kInterpreterAccumulatorRegister);
+  GetContext(cp);
   __ CallRuntime(is_strict(language_mode) ? Runtime::kStoreLookupSlot_Strict
                                           : Runtime::kStoreLookupSlot_Sloppy);
 }
@@ -574,6 +599,7 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
   __ mov(LoadWithVectorDescriptor::SlotRegister(),
          Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
   LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
+  GetContext(cp);
   __ Call(ic.code());
 }
 
@@ -583,9 +609,10 @@ void FastCodeGenerator::VisitLdaKeyedProperty() {
   __ mov(LoadWithVectorDescriptor::NameRegister(),
          kInterpreterAccumulatorRegister);
   __ mov(LoadWithVectorDescriptor::SlotRegister(),
-         Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
+         Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(1))));
   LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
   Callable ic = CodeFactory::KeyedLoadICInOptimizedCode(isolate_);
+  GetContext(cp);
   __ Call(ic.code());
 }
 
@@ -597,9 +624,12 @@ void FastCodeGenerator::DoStoreIC(const Callable& ic) {
   __ mov(StoreWithVectorDescriptor::SlotRegister(),
          Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
   LoadFeedbackVector(StoreWithVectorDescriptor::VectorRegister());
-  __ mov(StoreWithVectorDescriptor::ValueRegister(),
-         kInterpreterAccumulatorRegister);
+  if (!StoreWithVectorDescriptor::ValueRegister().is(
+          kInterpreterAccumulatorRegister))
+    __ mov(StoreWithVectorDescriptor::ValueRegister(),
+           kInterpreterAccumulatorRegister);
 
+  GetContext(cp);
   __ Call(ic.code());
 }
 
@@ -623,11 +653,14 @@ void FastCodeGenerator::DoKeyedStoreIC(const Callable& ic) {
                StoreWithVectorDescriptor::ReceiverRegister());
   LoadRegister(bytecode_iterator().GetRegisterOperand(1),
                StoreWithVectorDescriptor::NameRegister());
-  __ mov(StoreWithVectorDescriptor::ValueRegister(),
-         kInterpreterAccumulatorRegister);
+  if (!StoreWithVectorDescriptor::ValueRegister().is(
+          kInterpreterAccumulatorRegister))
+    __ mov(StoreWithVectorDescriptor::ValueRegister(),
+           kInterpreterAccumulatorRegister);
   __ mov(StoreWithVectorDescriptor::SlotRegister(),
          Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
   LoadFeedbackVector(StoreWithVectorDescriptor::VectorRegister());
+  GetContext(cp);
   __ Call(ic.code());
 }
 
@@ -662,6 +695,7 @@ void FastCodeGenerator::VisitCreateClosure() {
     LoadFeedbackVector(r2);
     __ mov(r3, Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(1))));
     Callable callable = CodeFactory::FastNewClosure(isolate_);
+    GetContext(cp);
     __ Call(callable.code());
   } else {
     int tenured_raw =
@@ -671,10 +705,11 @@ void FastCodeGenerator::VisitCreateClosure() {
     LoadFeedbackVector(r1);
     __ push(r1);
     uint32_t vector_index = bytecode_iterator().GetIndexOperand(1);
-    __ mov(r1, Operand(vector_index));
+    __ mov(r1, Operand(Smi::FromInt(vector_index)));
     __ push(r1);
     __ mov(r1, Operand(Smi::FromInt(tenured_raw)));
     __ push(r1);
+    GetContext(cp);
     __ CallRuntime(Runtime::kInterpreterNewClosure);
   }
 }
@@ -683,6 +718,7 @@ void FastCodeGenerator::VisitCreateBlockContext() {
   Handle<Object> scope_info = bytecode_iterator().GetConstantForIndexOperand(0);
   __ mov(r1, Operand(scope_info));
   __ push(r1);
+  GetContext(cp);
   __ CallRuntime(Runtime::kPushBlockContext);
 }
 
@@ -693,6 +729,7 @@ void FastCodeGenerator::VisitCreateFunctionContext() {
          Operand(bytecode_iterator().GetUnsignedImmediateOperand(0)));
   Callable callable =
       CodeFactory::FastNewFunctionContext(isolate(), FUNCTION_SCOPE);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -703,6 +740,7 @@ void FastCodeGenerator::VisitCreateEvalContext() {
          Operand(bytecode_iterator().GetUnsignedImmediateOperand(0)));
   Callable callable =
       CodeFactory::FastNewFunctionContext(isolate(), EVAL_SCOPE);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -716,6 +754,7 @@ void FastCodeGenerator::VisitCreateCatchContext() {
   __ mov(r1, Operand(scope_info));
   __ push(r1);
   __ push(kInterpreterAccumulatorRegister);
+  GetContext(cp);
   __ CallRuntime(Runtime::kPushCatchContext);
 }
 
@@ -726,6 +765,7 @@ void FastCodeGenerator::VisitCreateWithContext() {
   __ mov(r1, Operand(scope_info));
   __ push(r1);
   __ push(kInterpreterAccumulatorRegister);
+  GetContext(cp);
   __ CallRuntime(Runtime::kPushWithContext);
 }
 
@@ -738,6 +778,7 @@ void FastCodeGenerator::VisitCreateMappedArguments() {
   __ tst(
       r1,
       Operand(1 << SharedFunctionInfo::kHasDuplicateParametersBitWithinByte));
+  GetContext(cp);
   __ b(&if_duplicate_parameters, ne);
   Callable callable = CodeFactory::FastNewSloppyArguments(isolate_);
 
@@ -757,6 +798,7 @@ void FastCodeGenerator::VisitCreateUnmappedArguments() {
 
   LoadRegister(interpreter::Register::function_closure(),
                FastNewArgumentsDescriptor::TargetRegister());
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -765,6 +807,7 @@ void FastCodeGenerator::VisitCreateRestParameter() {
 
   LoadRegister(interpreter::Register::function_closure(),
                FastNewArgumentsDescriptor::TargetRegister());
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -777,6 +820,7 @@ void FastCodeGenerator::VisitCreateRegExpLiteral() {
   __ mov(r2, Operand(Smi::FromInt(literal_index)));
   __ mov(r1, Operand(pattern));
   __ mov(r0, Operand(Smi::FromInt(flags)));
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -792,6 +836,7 @@ void FastCodeGenerator::VisitCreateArrayLiteral() {
     uint32_t literal_index = bytecode_iterator().GetIndexOperand(1);
     __ mov(r2, Operand(Smi::FromInt(literal_index)));
     __ mov(r1, Operand(constant_elements));
+    GetContext(cp);
     __ Call(callable.code());
   } else {
     uint32_t flags =
@@ -805,6 +850,7 @@ void FastCodeGenerator::VisitCreateArrayLiteral() {
     __ push(r1);
     __ mov(r1, Operand(Smi::FromInt(flags)));
     __ push(r1);
+    GetContext(cp);
     __ CallRuntime(Runtime::kCreateArrayLiteral);
   }
 }
@@ -826,6 +872,7 @@ void FastCodeGenerator::VisitCreateObjectLiteral() {
     __ mov(r0, Operand(flags));
     Callable callable = CodeFactory::FastCloneShallowObject(
         isolate_, fast_clone_properties_count);
+    GetContext(cp);
     __ Call(callable.code());
     StoreRegister(bytecode_iterator().GetRegisterOperand(3), r0);
     __ pop(r0);
@@ -837,8 +884,9 @@ void FastCodeGenerator::VisitCreateObjectLiteral() {
     __ push(r1);
     __ mov(r1, Operand(constant_elements));
     __ push(r1);
-    __ mov(r1, Operand(flags));
+    __ mov(r1, Operand(Smi::FromInt(flags)));
     __ push(r1);
+    GetContext(cp);
     __ CallRuntime(Runtime::kCreateObjectLiteral);
     StoreRegister(bytecode_iterator().GetRegisterOperand(3), r0);
     __ pop(r0);
@@ -850,11 +898,11 @@ void FastCodeGenerator::DoJSCall(TailCallMode tail_call_mode) {
       isolate_, tail_call_mode, InterpreterPushArgsMode::kOther);
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   __ add(r2, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
-  uint32_t receiver_args_count =
-      bytecode_iterator().GetUnsignedImmediateOperand(2);
+                         << kPointerSizeLog2));
+  uint32_t receiver_args_count = bytecode_iterator().GetRegisterCountOperand(2);
   receiver_args_count -= 1;
   __ mov(r0, Operand(receiver_args_count));
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -877,37 +925,37 @@ void FastCodeGenerator::VisitCallJSRuntime() {
   __ ldr(r1, ContextMemOperand(cp, Context::NATIVE_CONTEXT_INDEX));
   __ ldr(r1, ContextMemOperand(r1, context_index));
   __ add(r2, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
-  uint32_t receiver_args_count =
-      bytecode_iterator().GetUnsignedImmediateOperand(2);
+                         << kPointerSizeLog2));
+  uint32_t receiver_args_count = bytecode_iterator().GetRegisterCountOperand(2);
   receiver_args_count -= 1;
   __ mov(r0, Operand(receiver_args_count));
+  GetContext(cp);
   __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitCallRuntime() {
-  uint32_t function_id = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  ExternalReference runtime_function(
-      static_cast<Runtime::FunctionId>(function_id), isolate_);
-  uint32_t args_count = bytecode_iterator().GetUnsignedImmediateOperand(2);
+  Runtime::FunctionId function_id = bytecode_iterator().GetRuntimeIdOperand(0);
+  ExternalReference runtime_function(function_id, isolate_);
+  uint32_t args_count = bytecode_iterator().GetRegisterCountOperand(2);
   __ mov(r0, Operand(args_count));
   __ add(r2, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
+                         << kPointerSizeLog2));
   __ mov(r1, Operand(runtime_function));
   Callable callable = CodeFactory::InterpreterCEntry(isolate(), 1);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitCallRuntimeForPair() {
-  uint32_t function_id = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  ExternalReference runtime_function(
-      static_cast<Runtime::FunctionId>(function_id), isolate_);
-  uint32_t args_count = bytecode_iterator().GetUnsignedImmediateOperand(2);
+  Runtime::FunctionId function_id = bytecode_iterator().GetRuntimeIdOperand(0);
+  ExternalReference runtime_function(function_id, isolate_);
+  uint32_t args_count = bytecode_iterator().GetRegisterCountOperand(2);
   __ mov(r0, Operand(args_count));
   __ add(r2, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
+                         << kPointerSizeLog2));
   __ mov(r1, Operand(runtime_function));
   Callable callable = CodeFactory::InterpreterCEntry(isolate(), 2);
+  GetContext(cp);
   __ Call(callable.code());
   auto reg = bytecode_iterator().GetRegisterOperand(3);
   __ str(r0, MemOperand(fp, reg.ToOperand() << kPointerSizeLog2));
@@ -921,27 +969,29 @@ void FastCodeGenerator::VisitConstructWithSpread() {
   // new target r3
   __ mov(r3, kInterpreterAccumulatorRegister);
   // argument count r0.
-  __ mov(r0, Operand(bytecode_iterator().GetUnsignedImmediateOperand(2)));
+  __ mov(r0, Operand(bytecode_iterator().GetRegisterCountOperand(2)));
   // constructor to call r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // allocation site feedback if available, undefined otherwisea r2
   __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
   // address of the first argument r4
   __ add(r4, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
+                         << kPointerSizeLog2));
+  GetContext(cp);
   __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitInvokeIntrinsic() {
-  uint32_t function_id = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  ExternalReference runtime_function(
-      static_cast<Runtime::FunctionId>(function_id), isolate_);
-  uint32_t args_count = bytecode_iterator().GetUnsignedImmediateOperand(2);
+  Runtime::FunctionId function_id =
+      bytecode_iterator().GetIntrinsicIdOperand(0);
+  ExternalReference runtime_function(function_id, isolate_);
+  uint32_t args_count = bytecode_iterator().GetRegisterCountOperand(2);
   __ mov(r0, Operand(args_count));
   __ add(r2, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
+                         << kPointerSizeLog2));
   __ mov(r1, Operand(runtime_function));
   Callable callable = CodeFactory::InterpreterCEntry(isolate(), 1);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -951,24 +1001,27 @@ void FastCodeGenerator::VisitConstruct() {
   // new target r3
   __ mov(r3, kInterpreterAccumulatorRegister);
   // argument count r0.
-  __ mov(r0, Operand(bytecode_iterator().GetUnsignedImmediateOperand(2)));
+  __ mov(r0, Operand(bytecode_iterator().GetRegisterCountOperand(2)));
   // constructor to call r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // allocation site feedback if available, undefined otherwisea r2
   __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
   // address of the first argument r4
   __ add(r4, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
-                         << kPointerSize));
+                         << kPointerSizeLog2));
+  GetContext(cp);
   __ Call(callable.code());
 }
 
 void FastCodeGenerator::VisitThrow() {
   __ push(kInterpreterAccumulatorRegister);
+  GetContext(cp);
   __ CallRuntime(Runtime::kThrow);
 }
 
 void FastCodeGenerator::VisitReThrow() {
   __ push(kInterpreterAccumulatorRegister);
+  GetContext(cp);
   __ CallRuntime(Runtime::kReThrow);
 }
 
@@ -983,6 +1036,7 @@ void FastCodeGenerator::DoBinaryOp() {
   // vector r3
   LoadFeedbackVector(r3);
   BinaryOpCodeStub stub(isolate_);
+  GetContext(cp);
   __ Call(stub.GetCode());
 }
 
@@ -1014,16 +1068,17 @@ void FastCodeGenerator::ChangeInt32ToTagged(Register result) {
   __ SmiTag(result, SetCC);
   __ b(&done, vc);
   // not a smi
-  Register heap_map = r0;
+  Register heap_map = r4;
   __ LoadRoot(heap_map, Heap::kHeapNumberMapRootIndex);
   __ vmov(s0, result);
   __ vcvt_f64_s32(d0, s0);
   __ AllocateHeapNumberWithValue(result, d0, r3, r2, heap_map, &slowalloc);
   __ b(&done);
   __ bind(&slowalloc);
+  GetContext(cp);
   __ CallRuntime(Runtime::kAllocateHeapNumber);
   __ vstr(d0, FieldMemOperand(r0, HeapNumber::kValueOffset));
-  __ mov(result, r0);
+  if (!r0.is(result)) __ mov(result, r0);
   __ bind(&done);
 }
 
@@ -1104,6 +1159,7 @@ void FastCodeGenerator::VisitAddSmi() {
   // vector r3
   LoadFeedbackVector(r3);
   AddWithFeedbackStub stub(isolate_);
+  GetContext(cp);
   __ Call(stub.GetCode());
   __ bind(&done);
 }
@@ -1130,13 +1186,14 @@ void FastCodeGenerator::VisitSubSmi() {
   // vector r3
   LoadFeedbackVector(r3);
   SubtractWithFeedbackStub stub(isolate_);
+  GetContext(cp);
   __ Call(stub.GetCode());
   __ bind(&done);
 }
 
 void FastCodeGenerator::VisitBitwiseOrSmi() {
   Register lhs = r0;
-  Register word_result = r0;
+  Register word_result = kInterpreterAccumulatorRegister;
   LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
   __ push(lhs);
   __ add(r9, sp, Operand(0));
@@ -1148,7 +1205,7 @@ void FastCodeGenerator::VisitBitwiseOrSmi() {
 
 void FastCodeGenerator::VisitBitwiseAndSmi() {
   Register lhs = r0;
-  Register word_result = r0;
+  Register word_result = kInterpreterAccumulatorRegister;
   LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
   __ push(lhs);
   __ add(r9, sp, Operand(0));
@@ -1161,7 +1218,7 @@ void FastCodeGenerator::VisitBitwiseAndSmi() {
 
 void FastCodeGenerator::VisitShiftLeftSmi() {
   Register lhs = r0;
-  Register word_result = r0;
+  Register word_result = kInterpreterAccumulatorRegister;
   LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
   __ push(lhs);
   __ add(r9, sp, Operand(0));
@@ -1174,7 +1231,7 @@ void FastCodeGenerator::VisitShiftLeftSmi() {
 
 void FastCodeGenerator::VisitShiftRightSmi() {
   Register lhs = r0;
-  Register word_result = r0;
+  Register word_result = kInterpreterAccumulatorRegister;
   LoadRegister(bytecode_iterator().GetRegisterOperand(1), lhs);
   __ push(lhs);
   __ add(r9, sp, Operand(0));
@@ -1195,6 +1252,7 @@ void FastCodeGenerator::VisitInc() {
   // vector r3
   LoadFeedbackVector(r3);
   AddWithFeedbackStub stub(isolate_);
+  GetContext(cp);
   __ Call(stub.GetCode());
 }
 
@@ -1208,6 +1266,7 @@ void FastCodeGenerator::VisitDec() {
   // vector r3
   LoadFeedbackVector(r3);
   AddWithFeedbackStub stub(isolate_);
+  GetContext(cp);
   __ Call(stub.GetCode());
 }
 
@@ -1268,6 +1327,7 @@ void FastCodeGenerator::VisitTypeOf() {
   // r3 is the only input.
   __ mov(r3, kInterpreterAccumulatorRegister);
   Callable callable = CodeFactory::Typeof(isolate_);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1275,6 +1335,7 @@ void FastCodeGenerator::DoDelete(Runtime::FunctionId function_id) {
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   __ push(r1);
   __ push(kInterpreterAccumulatorRegister);
+  GetContext(cp);
   __ CallRuntime(function_id);
 }
 
@@ -1300,6 +1361,7 @@ void FastCodeGenerator::VisitGetSuperConstructor() {
   __ b(&is_constructor, ne);
   // prototype is not constructor
   __ Push(super_constructor, active_function);
+  GetContext(cp);
   __ CallRuntime(Runtime::kThrowNotSuperConstructor);
   __ bind(&is_constructor);
   StoreRegister(bytecode_iterator().GetRegisterOperand(0), super_constructor);
@@ -1310,6 +1372,7 @@ void FastCodeGenerator::VisitTestEqual() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1318,6 +1381,7 @@ void FastCodeGenerator::VisitTestNotEqual() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1326,6 +1390,7 @@ void FastCodeGenerator::VisitTestEqualStrict() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1334,6 +1399,7 @@ void FastCodeGenerator::VisitTestLessThan() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1342,6 +1408,7 @@ void FastCodeGenerator::VisitTestGreaterThan() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1350,6 +1417,7 @@ void FastCodeGenerator::VisitTestLessThanOrEqual() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1358,6 +1426,7 @@ void FastCodeGenerator::VisitTestGreaterThanOrEqual() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1367,6 +1436,7 @@ void FastCodeGenerator::VisitTestIn() {
   __ mov(r1, kInterpreterAccumulatorRegister);
   // key in r0
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1375,6 +1445,7 @@ void FastCodeGenerator::VisitTestInstanceOf() {
   // lhs in r1
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r1);
   // rhs already in r0
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1413,24 +1484,27 @@ void FastCodeGenerator::VisitTestUndefined() {
 
 void FastCodeGenerator::VisitToName() {
   Callable callable = CodeFactory::ToName(isolate_);
+  GetContext(cp);
   __ Call(callable.code());
   StoreRegister(bytecode_iterator().GetRegisterOperand(0), r0);
 }
 
 void FastCodeGenerator::VisitToObject() {
   Callable callable = CodeFactory::ToObject(isolate_);
+  GetContext(cp);
   __ Call(callable.code());
   StoreRegister(bytecode_iterator().GetRegisterOperand(0), r0);
 }
 
 void FastCodeGenerator::VisitToNumber() {
   Callable callable = CodeFactory::ToNumber(isolate_);
+  GetContext(cp);
   __ Call(callable.code());
   StoreRegister(bytecode_iterator().GetRegisterOperand(0), r0);
 }
 
 void FastCodeGenerator::VisitJump() {
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1450,7 +1524,7 @@ void FastCodeGenerator::VisitJumpConstant() {
 void FastCodeGenerator::VisitJumpIfTrue() {
   __ LoadRoot(r1, Heap::kTrueValueRootIndex);
   __ cmp(kInterpreterAccumulatorRegister, r1);
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1472,7 +1546,7 @@ void FastCodeGenerator::VisitJumpIfTrueConstant() {
 void FastCodeGenerator::VisitJumpIfFalse() {
   __ LoadRoot(r1, Heap::kFalseValueRootIndex);
   __ cmp(kInterpreterAccumulatorRegister, r1);
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1493,7 +1567,7 @@ void FastCodeGenerator::VisitJumpIfFalseConstant() {
 
 void FastCodeGenerator::VisitJumpIfToBooleanTrue() {
   Label if_false;
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* if_true = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(if_true);
@@ -1517,7 +1591,7 @@ void FastCodeGenerator::VisitJumpIfToBooleanTrueConstant() {
 
 void FastCodeGenerator::VisitJumpIfToBooleanFalse() {
   Label if_true;
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* if_false = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(if_false);
@@ -1540,7 +1614,7 @@ void FastCodeGenerator::VisitJumpIfToBooleanFalseConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfNotHole() {
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1562,7 +1636,7 @@ void FastCodeGenerator::VisitJumpIfNotHoleConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfJSReceiver() {
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1596,7 +1670,7 @@ void FastCodeGenerator::VisitJumpIfJSReceiverConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfNull() {
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1618,7 +1692,7 @@ void FastCodeGenerator::VisitJumpIfNullConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfUndefined() {
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
       relative_jump + bytecode_iterator().current_offset());
   DCHECK_NOT_NULL(label);
@@ -1640,9 +1714,9 @@ void FastCodeGenerator::VisitJumpIfUndefinedConstant() {
 }
 
 void FastCodeGenerator::VisitJumpLoop() {
-  int relative_jump = bytecode_iterator().GetImmediateOperand(0);
+  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
   Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+      bytecode_iterator().current_offset() - relative_jump);
   DCHECK_NOT_NULL(label);
   __ b(label);
 }
@@ -1653,6 +1727,7 @@ void FastCodeGenerator::VisitStackCheck() {
   __ ldr(r1, MemOperand(r1));
   __ cmp(sp, r1);
   __ b(&done, ge);
+  GetContext(cp);
   __ CallRuntime(Runtime::kStackGuard);
   __ bind(&done);
 }
@@ -1672,6 +1747,7 @@ void FastCodeGenerator::VisitReturn() { __ b(&return_); }
 
 void FastCodeGenerator::VisitDebugger() {
   Callable callable = CodeFactory::HandleDebuggerStatement(isolate_);
+  GetContext(cp);
   __ Call(callable.code());
 }
 
@@ -1680,25 +1756,24 @@ void FastCodeGenerator::VisitForInPrepare() {
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
   __ CheckEnumCache(&call_runtime);
 
-  __ ldr(r1, FieldMemOperand(r0, DescriptorArray::kEnumCacheOffset));
-  __ ldr(r1, FieldMemOperand(r1, DescriptorArray::kEnumCacheBridgeCacheOffset));
-  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
   __ ldr(r0, FieldMemOperand(r0, HeapObject::kMapOffset));
+  __ ldr(r1, FieldMemOperand(r0, Map::kDescriptorsOffset));
+  __ ldr(r1, FieldMemOperand(r1, DescriptorArray::kEnumCacheOffset));
+  __ ldr(r1, FieldMemOperand(r1, DescriptorArray::kEnumCacheBridgeCacheOffset));
   auto reg = bytecode_iterator().GetRegisterOperand(1);
   __ mov(r2, r0);
   __ EnumLength(r2, r2);
   __ b(&done);
   __ bind(&call_runtime);
-  LoadRegister(bytecode_iterator().GetRegisterOperand(0), r0);
   __ push(r0);
+  GetContext(cp);
   __ CallRuntime(Runtime::kForInPrepare);
   __ bind(&done);
   __ str(r0, MemOperand(fp, reg.ToOperand() << kPointerSizeLog2));
-  __ str(r1, MemOperand(
-                 fp, (reg.ToOperand() << kPointerSizeLog2) - kPointerSizeLog2));
-  __ str(r2,
-         MemOperand(
-             fp, (reg.ToOperand() << kPointerSizeLog2) - 2 * kPointerSizeLog2));
+  __ str(r1,
+         MemOperand(fp, (reg.ToOperand() << kPointerSizeLog2) - kPointerSize));
+  __ str(r2, MemOperand(
+                 fp, (reg.ToOperand() << kPointerSizeLog2) - 2 * kPointerSize));
 }
 
 void FastCodeGenerator::VisitForInContinue() {
@@ -1717,21 +1792,26 @@ void FastCodeGenerator::VisitForInNext() {
   Register cache_type = r2;
   Register receiver = r1;
   Register receiver_map = r3;
+  Register index = r4;
   Register key = kInterpreterAccumulatorRegister;
   LoadRegister(bytecode_iterator().GetRegisterOperand(0), receiver);
   __ ldr(receiver_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
-  __ ldrd(cache_array, cache_type,
-          MemOperand(fp,
-                     (bytecode_iterator().GetRegisterOperand(2).ToOperand()
-                      << kPointerSizeLog2) -
-                         kPointerSize));
-  LoadFixedArrayElement(cache_array, key,
-                        bytecode_iterator().GetIndexOperand(1), 0);
+  __ ldr(cache_type,
+         MemOperand(fp, (bytecode_iterator().GetRegisterOperand(2).ToOperand()
+                         << kPointerSizeLog2)));
+  __ ldr(cache_array,
+         MemOperand(fp,
+                    (bytecode_iterator().GetRegisterOperand(2).ToOperand()
+                     << kPointerSizeLog2) -
+                        kPointerSize));
+  LoadRegister(bytecode_iterator().GetRegisterOperand(1), index);
+  LoadFixedArrayElementSmiIndex(cache_array, key, index, 0);
   __ cmp(receiver_map, cache_type);
   __ b(&done, eq);
   Callable callable = CodeFactory::ForInFilter(isolate());
   // key already in r0
   // receiver already in r1
+  GetContext(cp);
   __ Call(callable.code());
   __ bind(&done);
 }

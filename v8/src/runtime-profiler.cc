@@ -205,6 +205,7 @@ void RuntimeProfiler::AttemptOnStackReplacement(JavaScriptFrame* frame,
     int level = shared->bytecode_array()->osr_loop_nesting_level();
     shared->bytecode_array()->set_osr_loop_nesting_level(
         Min(level + loop_nesting_levels, AbstractCode::kMaxLoopNestingMarker));
+  } else if (frame->type() == StackFrame::FASTCODEGEN) {
   } else {
     UNREACHABLE();
   }
