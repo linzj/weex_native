@@ -298,7 +298,7 @@ void FastCodeGenerator::SetContext(Register in) {
 void FastCodeGenerator::BuildLoadGlobal(Register out, int slot_operand_index,
                                         int name_operand_index,
                                         TypeofMode typeof_mode) {
-  Register feedback_vector_reg = r1;
+  Register feedback_vector_reg = r2;
   LoadFeedbackVector(feedback_vector_reg);
   uint32_t feedback_slot =
       bytecode_iterator().GetIndexOperand(slot_operand_index);
