@@ -608,12 +608,24 @@ void FastCodeGenerator::DoLoadField(Register receiver, int handler_word) {
            eq);
   } else {
     __ ldr(kInterpreterAccumulatorRegister,
-           FieldMemOperand(receiver,
-                           JSObject::kPropertiesOffset),
-           eq);
+           FieldMemOperand(receiver, JSObject::kPropertiesOffset), eq);
     __ ldr(kInterpreterAccumulatorRegister,
            FieldMemOperand(kInterpreterAccumulatorRegister, offset), eq);
   }
+}
+
+void FastCodeGenerator::HandleSmiCase(const Register& receiver,
+                                      const Register& receiver_map,
+                                      Object* feedback, Object* smi,
+                                      Label* done, Label* slowcase) {
+  WeakCell* weak_cell = WeakCell::cast(feedback);
+  if (weak_cell->cleared()) return;
+  Handle<Object> map(weak_cell->value(), isolate());
+  int handler_word = Smi::cast(smi)->value();
+  if (!CanManageSmiHandlerCase(handler_word)) return;
+  __ cmp(receiver_map, Operand(map));
+  DoLoadField(receiver, handler_word);
+  __ b(done, eq);
 }
 #endif  // ENABLE_IC
 
@@ -625,7 +637,8 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
   Register receiver_map = r4;
   Register map_flags = r3;
   Handle<JSFunction> closure = info()->closure();
-  FeedbackSlot slot(bytecode_iterator().GetIndexOperand(2) - FeedbackVector::kReservedIndexCount);
+  FeedbackSlot slot(bytecode_iterator().GetIndexOperand(2) -
+                    FeedbackVector::kReservedIndexCount);
   LoadICNexus load_ic_nexus(closure->feedback_vector(), slot);
   Label done, slowpath;
   __ ldr(receiver_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
@@ -637,16 +650,10 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
     case MONOMORPHIC: {
       Object* feedback = load_ic_nexus.GetFeedback();
       Object* feedback_extra = load_ic_nexus.GetFeedbackExtra();
-      if (feedback->IsWeakCell() || feedback_extra->IsSmi()) {
-        WeakCell* weak_cell = WeakCell::cast(feedback);
-        if (weak_cell->cleared()) break;
-        Handle<Object> map(weak_cell->value(), isolate());
-        int handler_word = Smi::cast(feedback_extra)->value();
-        if (!CanManageSmiHandlerCase(handler_word)) break;
-        __ cmp(receiver_map, Operand(map));
-        DoLoadField(receiver, handler_word);
-        __ b(&done, eq);
-      }
+      if (feedback->IsWeakCell())
+        if (feedback_extra->IsSmi())
+          HandleSmiCase(receiver, receiver_map, feedback, feedback_extra, &done,
+                        &slowpath);
     } break;
     case POLYMORPHIC: {
       Object* feedback = load_ic_nexus.GetFeedback();

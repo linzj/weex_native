@@ -70,6 +70,9 @@ class FastCodeGenerator {
   void BranchIfToBooleanIsTrue(Label* if_true, Label* if_false);
   void DoDelete(Runtime::FunctionId function_id);
   void DoLoadField(Register receiver, int handler_word);
+  void HandleSmiCase(const Register& receiver, const Register& receiver_map,
+                     Object* feedback, Object* smi, Label* done,
+                     Label* slowcase);
 
   MacroAssembler masm_;
   CompilationInfo* info_;
