@@ -39,8 +39,8 @@ class FastCodeGenerator {
 
   void LoadFixedArrayElement(Register array, Register to, uint32_t index,
                              int additional_offset = 0);
-  void LoadFixedArrayElementSmiIndex(Register array, Register to, Register index,
-                             int additional_offset);
+  void LoadFixedArrayElementSmiIndex(Register array, Register to,
+                                     Register index, int additional_offset);
   void LoadWeakCellValueUnchecked(Register weak_cell, Register to);
   void LoadFeedbackVector(Register out);
   void LoadRegister(const interpreter::Register& r, Register out);
@@ -69,6 +69,7 @@ class FastCodeGenerator {
   void ChangeInt32ToTagged(Register result);
   void BranchIfToBooleanIsTrue(Label* if_true, Label* if_false);
   void DoDelete(Runtime::FunctionId function_id);
+  void DoLoadField(Register receiver, int handler_word);
 
   MacroAssembler masm_;
   CompilationInfo* info_;

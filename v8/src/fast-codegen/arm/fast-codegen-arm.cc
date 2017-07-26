@@ -2,7 +2,9 @@
 #include "src/compilation-info.h"
 #include "src/fast-codegen/fast-codegen.h"
 #include "src/fast-codegen/label-recorder.h"
+#include "src/feedback-vector.h"
 #include "src/ic/accessor-assembler.h"
+#include "src/ic/handler-configuration.h"
 #include "src/interpreter/bytecode-array-iterator.h"
 #include "src/interpreter/bytecode-flags.h"
 #include "src/interpreter/bytecodes.h"
@@ -187,9 +189,10 @@ void FastCodeGenerator::LoadFixedArrayElement(Register array, Register to,
   __ Load(to, FieldMemOperand(array, offset), Representation::HeapObject());
 }
 
-void FastCodeGenerator::LoadFixedArrayElementSmiIndex(Register array, Register to,
-                                              Register index,
-                                              int additional_offset) {
+void FastCodeGenerator::LoadFixedArrayElementSmiIndex(Register array,
+                                                      Register to,
+                                                      Register index,
+                                                      int additional_offset) {
   int32_t header_size = FixedArray::kHeaderSize + additional_offset;
   int element_size_shift = ElementsKindToShiftSize(FAST_HOLEY_ELEMENTS);
   int const kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
@@ -590,10 +593,84 @@ void FastCodeGenerator::VisitStaLookupSlotStrict() {
   DoStaLookupSlot(LanguageMode::STRICT);
 }
 
+#if defined(ENABLE_IC)
+static bool CanManageSmiHandlerCase(int handler_word) {
+  int handler_kind = LoadHandler::KindBits::decode(handler_word);
+  if (handler_kind != LoadHandler::kForFields) return false;
+  if (LoadHandler::IsDoubleBits::decode(handler_word)) return false;
+  return true;
+}
+
+void FastCodeGenerator::DoLoadField(Register receiver, int handler_word) {
+  int offset = LoadHandler::FieldOffsetBits::decode(handler_word);
+  if (LoadHandler::IsInobjectBits::decode(handler_word)) {
+    __ ldr(kInterpreterAccumulatorRegister, FieldMemOperand(receiver, offset),
+           eq);
+  } else {
+    __ ldr(kInterpreterAccumulatorRegister,
+           FieldMemOperand(receiver,
+                           JSObject::kPropertiesOffset),
+           eq);
+    __ ldr(kInterpreterAccumulatorRegister,
+           FieldMemOperand(kInterpreterAccumulatorRegister, offset), eq);
+  }
+}
+#endif  // ENABLE_IC
+
 void FastCodeGenerator::VisitLdaNamedProperty() {
   Callable ic = CodeFactory::LoadICInOptimizedCode(isolate_);
-  LoadRegister(bytecode_iterator().GetRegisterOperand(0),
-               LoadWithVectorDescriptor::ReceiverRegister());
+  Register receiver = LoadWithVectorDescriptor::ReceiverRegister();
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), receiver);
+#if defined(ENABLE_IC)
+  Register receiver_map = r4;
+  Register map_flags = r3;
+  Handle<JSFunction> closure = info()->closure();
+  FeedbackSlot slot(bytecode_iterator().GetIndexOperand(2) - FeedbackVector::kReservedIndexCount);
+  LoadICNexus load_ic_nexus(closure->feedback_vector(), slot);
+  Label done, slowpath;
+  __ ldr(receiver_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
+  __ ldr(map_flags, FieldMemOperand(receiver_map, Map::kBitField3Offset));
+  uint32_t map_deprecated_mask = Map::Deprecated::encode(1);
+  __ tst(map_flags, Operand(map_deprecated_mask));
+  __ b(&slowpath, ne);
+  switch (load_ic_nexus.ic_state()) {
+    case MONOMORPHIC: {
+      Object* feedback = load_ic_nexus.GetFeedback();
+      Object* feedback_extra = load_ic_nexus.GetFeedbackExtra();
+      if (feedback->IsWeakCell() || feedback_extra->IsSmi()) {
+        WeakCell* weak_cell = WeakCell::cast(feedback);
+        if (weak_cell->cleared()) break;
+        Handle<Object> map(weak_cell->value(), isolate());
+        int handler_word = Smi::cast(feedback_extra)->value();
+        if (!CanManageSmiHandlerCase(handler_word)) break;
+        __ cmp(receiver_map, Operand(map));
+        DoLoadField(receiver, handler_word);
+        __ b(&done, eq);
+      }
+    } break;
+    case POLYMORPHIC: {
+      Object* feedback = load_ic_nexus.GetFeedback();
+      if (feedback->IsFixedArray()) {
+        FixedArray* feedback_array = FixedArray::cast(feedback);
+        for (int i = 0; i < feedback_array->length(); i += 2) {
+          Object* handler = feedback_array->get(i + 1);
+          if (!(handler->IsSmi() && handler != nullptr)) continue;
+          int handler_word = Smi::cast(handler)->value();
+          if (!CanManageSmiHandlerCase(handler_word)) continue;
+          WeakCell* weak_cell = WeakCell::cast(feedback_array->get(i));
+          if (weak_cell->cleared()) continue;
+          Handle<Object> map(weak_cell->value(), isolate());
+          __ cmp(receiver_map, Operand(map));
+          DoLoadField(receiver, handler_word);
+          __ b(&done, eq);
+        }
+      }
+    } break;
+    default:
+      break;
+  }
+  __ bind(&slowpath);
+#endif  // ENABLE_IC
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
   __ mov(LoadWithVectorDescriptor::NameRegister(), Operand(name));
   __ mov(LoadWithVectorDescriptor::SlotRegister(),
@@ -601,6 +678,9 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
   LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
   GetContext(cp);
   __ Call(ic.code());
+#if defined(ENABLE_IC)
+  __ bind(&done);
+#endif  // ENABLE_IC
 }
 
 void FastCodeGenerator::VisitLdaKeyedProperty() {
