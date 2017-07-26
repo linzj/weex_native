@@ -593,11 +593,15 @@ void FastCodeGenerator::VisitStaLookupSlotStrict() {
   DoStaLookupSlot(LanguageMode::STRICT);
 }
 
+#define ENABLE_IC
 #if defined(ENABLE_IC)
 static bool CanManageSmiHandlerCase(int handler_word) {
   int handler_kind = LoadHandler::KindBits::decode(handler_word);
-  if (handler_kind != LoadHandler::kForFields) return false;
+  if (handler_kind != LoadHandler::kForFields &&
+      handler_kind != LoadHandler::kForConstants)
+    return false;
   if (LoadHandler::IsDoubleBits::decode(handler_word)) return false;
+  if (LoadHandler::IsAccessorInfoBits::decode(handler_word)) return false;
   return true;
 }
 
@@ -614,18 +618,55 @@ void FastCodeGenerator::DoLoadField(Register receiver, int handler_word) {
   }
 }
 
+void FastCodeGenerator::DoLoadConstant(Handle<Object> _map, int handler_word) {
+  Handle<Map> map = Handle<Map>::cast(_map);
+  DescriptorArray* desc_array = map->instance_descriptors();
+  int index = LoadHandler::DescriptorBits::decode(handler_word);
+  Handle<Object> constant(desc_array->GetValue(index), isolate());
+  __ mov(kInterpreterAccumulatorRegister, Operand(constant), LeaveCC, eq);
+}
+
 void FastCodeGenerator::HandleSmiCase(const Register& receiver,
                                       const Register& receiver_map,
                                       Object* feedback, Object* smi,
-                                      Label* done, Label* slowcase) {
+                                      Label* done, Label* next) {
   WeakCell* weak_cell = WeakCell::cast(feedback);
   if (weak_cell->cleared()) return;
   Handle<Object> map(weak_cell->value(), isolate());
   int handler_word = Smi::cast(smi)->value();
   if (!CanManageSmiHandlerCase(handler_word)) return;
   __ cmp(receiver_map, Operand(map));
-  DoLoadField(receiver, handler_word);
+  int handler_kind = LoadHandler::KindBits::decode(handler_word);
+  if (handler_kind == LoadHandler::kForFields)
+    DoLoadField(receiver, handler_word);
+  else
+    DoLoadConstant(map, handler_word);
   __ b(done, eq);
+}
+
+void FastCodeGenerator::HandleCase(const Register& receiver,
+                                   const Register& receiver_map,
+                                   Object* feedback, Object* handler,
+                                   Label* done, Label* next) {
+  if (handler->IsSmi() && handler != nullptr)
+    HandleSmiCase(receiver, receiver_map, feedback, handler, done, next);
+  if (handler->IsCode()) {
+    // recevier already in position.
+    WeakCell* weak_cell = WeakCell::cast(feedback);
+    if (weak_cell->cleared()) return;
+    Handle<Object> map(weak_cell->value(), isolate());
+    __ cmp(receiver_map, Operand(map));
+    __ b(next, ne);
+    Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
+    __ mov(LoadWithVectorDescriptor::NameRegister(), Operand(name));
+    __ mov(LoadWithVectorDescriptor::SlotRegister(),
+           Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
+    LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
+    GetContext(cp);
+    Handle<Object> _code(handler, isolate());
+    __ Call(Handle<Code>::cast(_code));
+    __ b(done);
+  }
 }
 #endif  // ENABLE_IC
 
@@ -646,14 +687,14 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
   uint32_t map_deprecated_mask = Map::Deprecated::encode(1);
   __ tst(map_flags, Operand(map_deprecated_mask));
   __ b(&slowpath, ne);
+  std::unique_ptr<Label> next;
   switch (load_ic_nexus.ic_state()) {
     case MONOMORPHIC: {
       Object* feedback = load_ic_nexus.GetFeedback();
       Object* feedback_extra = load_ic_nexus.GetFeedbackExtra();
       if (feedback->IsWeakCell())
-        if (feedback_extra->IsSmi())
-          HandleSmiCase(receiver, receiver_map, feedback, feedback_extra, &done,
-                        &slowpath);
+        HandleCase(receiver, receiver_map, feedback, feedback_extra, &done,
+                   &slowpath);
     } break;
     case POLYMORPHIC: {
       Object* feedback = load_ic_nexus.GetFeedback();
@@ -661,21 +702,17 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
         FixedArray* feedback_array = FixedArray::cast(feedback);
         for (int i = 0; i < feedback_array->length(); i += 2) {
           Object* handler = feedback_array->get(i + 1);
-          if (!(handler->IsSmi() && handler != nullptr)) continue;
-          int handler_word = Smi::cast(handler)->value();
-          if (!CanManageSmiHandlerCase(handler_word)) continue;
-          WeakCell* weak_cell = WeakCell::cast(feedback_array->get(i));
-          if (weak_cell->cleared()) continue;
-          Handle<Object> map(weak_cell->value(), isolate());
-          __ cmp(receiver_map, Operand(map));
-          DoLoadField(receiver, handler_word);
-          __ b(&done, eq);
+          if (next) __ bind(next.get());
+          next.reset(new Label);
+          HandleCase(receiver, receiver_map, feedback_array->get(i), handler,
+                     &done, next.get());
         }
       }
     } break;
     default:
       break;
   }
+  if (next && next->is_linked()) __ bind(next.get());
   __ bind(&slowpath);
 #endif  // ENABLE_IC
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);

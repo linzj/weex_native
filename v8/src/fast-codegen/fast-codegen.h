@@ -71,8 +71,11 @@ class FastCodeGenerator {
   void DoDelete(Runtime::FunctionId function_id);
   void DoLoadField(Register receiver, int handler_word);
   void HandleSmiCase(const Register& receiver, const Register& receiver_map,
-                     Object* feedback, Object* smi, Label* done,
-                     Label* slowcase);
+                     Object* feedback, Object* smi, Label* done, Label* next);
+  void DoLoadConstant(Handle<Object> map, int handler_word);
+
+  void HandleCase(const Register& receiver, const Register& receiver_map,
+                  Object* feedback, Object* handler, Label* done, Label* next);
 
   MacroAssembler masm_;
   CompilationInfo* info_;
