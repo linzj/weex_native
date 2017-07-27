@@ -193,16 +193,15 @@ void FastCodeGenerator::LoadFixedArrayElementSmiIndex(Register array,
                                                       Register to,
                                                       Register index,
                                                       int additional_offset) {
-  int32_t header_size = FixedArray::kHeaderSize + additional_offset;
+  int32_t header_size =
+      FixedArray::kHeaderSize + additional_offset - kHeapObjectTag;
   int element_size_shift = ElementsKindToShiftSize(FAST_HOLEY_ELEMENTS);
   int const kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
   element_size_shift -= kSmiShiftBits;
   Register offset = index;
   __ lsl(offset, index, Operand(element_size_shift));
-  __ add(offset, array, Operand(offset));
-  __ bic(offset, offset, Operand(1));
   __ add(offset, offset, Operand(header_size));
-  __ Load(to, MemOperand(offset), Representation::HeapObject());
+  __ Load(to, MemOperand(array, offset), Representation::HeapObject());
 }
 
 void FastCodeGenerator::VisitLdaConstant() {
@@ -596,16 +595,13 @@ void FastCodeGenerator::VisitStaLookupSlotStrict() {
 #define ENABLE_IC
 #if defined(ENABLE_IC)
 static bool CanManageSmiHandlerCase(int handler_word) {
-  int handler_kind = LoadHandler::KindBits::decode(handler_word);
-  if (handler_kind != LoadHandler::kForFields &&
-      handler_kind != LoadHandler::kForConstants)
-    return false;
   if (LoadHandler::IsDoubleBits::decode(handler_word)) return false;
   if (LoadHandler::IsAccessorInfoBits::decode(handler_word)) return false;
   return true;
 }
 
-void FastCodeGenerator::DoLoadField(Register receiver, int handler_word) {
+void FastCodeGenerator::DoLoadField(Register receiver, int handler_word,
+                                    Label* done) {
   int offset = LoadHandler::FieldOffsetBits::decode(handler_word);
   if (LoadHandler::IsInobjectBits::decode(handler_word)) {
     __ ldr(kInterpreterAccumulatorRegister, FieldMemOperand(receiver, offset),
@@ -616,14 +612,87 @@ void FastCodeGenerator::DoLoadField(Register receiver, int handler_word) {
     __ ldr(kInterpreterAccumulatorRegister,
            FieldMemOperand(kInterpreterAccumulatorRegister, offset), eq);
   }
+  __ b(done, eq);
 }
 
-void FastCodeGenerator::DoLoadConstant(Handle<Object> _map, int handler_word) {
+void FastCodeGenerator::DoLoadConstant(Handle<Object> _map, int handler_word,
+                                       Label* done) {
   Handle<Map> map = Handle<Map>::cast(_map);
   DescriptorArray* desc_array = map->instance_descriptors();
   int index = LoadHandler::DescriptorBits::decode(handler_word);
   Handle<Object> constant(desc_array->GetValue(index), isolate());
   __ mov(kInterpreterAccumulatorRegister, Operand(constant), LeaveCC, eq);
+  __ b(done, eq);
+}
+
+void FastCodeGenerator::DoNormalLoad(const Register& receiver, Label* done,
+                                     Label* next) {
+  Register properties = r9;
+  Register key = r1;
+  Register value_index = r2;
+  Register value_index_tmp = r4;
+  Register details = r0;
+  Register kind = r0;
+  Register value = r2;
+  Register map = r0;
+  Register accessor_pair_instance_type = r0;
+  Register getter = r2;
+  Register getter_map = r3;
+  Register getter_instance_type = r0;
+  Register getter_map_bitfield = r0;
+  DCHECK(receiver.is(r1));
+  __ b(next, ne);
+  __ push(receiver);
+  __ ldr(properties, FieldMemOperand(receiver, JSObject::kPropertiesOffset));
+  __ mov(r0, properties);
+  Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
+  __ mov(key, Operand(name));
+  NameDictionaryLookupStub stub(isolate(),
+                                NameDictionaryLookupStub::POSITIVE_LOOKUP);
+  __ Call(stub.GetCode());
+  __ pop(receiver);
+  __ cmp(r0, Operand(0));
+  __ b(next, eq);  // FIXME: should be set to slow case
+  const int kKeyToDetailsOffset =
+      (NameDictionary::kEntryDetailsIndex - NameDictionary::kEntryKeyIndex) *
+      kPointerSize;
+  const int kKeyToValueOffset =
+      (NameDictionary::kEntryValueIndex - NameDictionary::kEntryKeyIndex) *
+      kPointerSize;
+  __ mov(value_index_tmp, value_index);
+  LoadFixedArrayElementSmiIndex(properties, details, value_index_tmp,
+                                kKeyToDetailsOffset);
+  LoadFixedArrayElementSmiIndex(properties, value, value_index,
+                                kKeyToValueOffset);
+  __ and_(kind, details, Operand(3));
+  __ cmp(kind, Operand(kData));
+  __ mov(kInterpreterAccumulatorRegister, value, LeaveCC, eq);
+  __ b(done, eq);
+  __ ldr(map, FieldMemOperand(value, HeapObject::kMapOffset));
+  __ ldrb(accessor_pair_instance_type,
+          FieldMemOperand(map, Map::kInstanceTypeOffset));
+  __ cmp(accessor_pair_instance_type, Operand(ACCESSOR_INFO_TYPE));
+  __ b(next, eq);  // FIXME: should be set to slow case
+  __ ldr(getter, FieldMemOperand(value, AccessorPair::kGetterOffset));
+  __ ldr(getter_map, FieldMemOperand(getter, HeapObject::kMapOffset));
+  __ ldrb(getter_instance_type,
+          FieldMemOperand(getter_map, Map::kInstanceTypeOffset));
+  __ cmp(getter_instance_type, Operand(FUNCTION_TEMPLATE_INFO_TYPE));
+  __ b(next, eq);  // FIXME: should be set to slow case
+  __ ldrb(getter_map_bitfield,
+          FieldMemOperand(getter_map, Map::kBitFieldOffset));
+  __ tst(getter_map_bitfield, Operand(1 << Map::kIsCallable));
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kUndefinedValueRootIndex,
+              eq);
+  __ b(done, eq);
+
+  Callable callable = CodeFactory::Call(isolate());
+  __ sub(sp, sp,
+         Operand(kPointerSize));  // receiver is just popped, not clobber yet
+  __ mov(r0, Operand(0));
+  __ mov(r1, getter);
+  __ Call(callable.code());
+  __ b(done);
 }
 
 void FastCodeGenerator::HandleSmiCase(const Register& receiver,
@@ -638,10 +707,11 @@ void FastCodeGenerator::HandleSmiCase(const Register& receiver,
   __ cmp(receiver_map, Operand(map));
   int handler_kind = LoadHandler::KindBits::decode(handler_word);
   if (handler_kind == LoadHandler::kForFields)
-    DoLoadField(receiver, handler_word);
+    DoLoadField(receiver, handler_word, done);
+  else if (handler_kind == LoadHandler::kForConstants)
+    DoLoadConstant(map, handler_word, done);
   else
-    DoLoadConstant(map, handler_word);
-  __ b(done, eq);
+    DoNormalLoad(receiver, done, next);
 }
 
 void FastCodeGenerator::HandleCase(const Register& receiver,
@@ -682,6 +752,8 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
                     FeedbackVector::kReservedIndexCount);
   LoadICNexus load_ic_nexus(closure->feedback_vector(), slot);
   Label done, slowpath;
+  __ SmiTst(receiver);
+  __ b(&slowpath, eq);
   __ ldr(receiver_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
   __ ldr(map_flags, FieldMemOperand(receiver_map, Map::kBitField3Offset));
   uint32_t map_deprecated_mask = Map::Deprecated::encode(1);
@@ -702,7 +774,7 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
         FixedArray* feedback_array = FixedArray::cast(feedback);
         for (int i = 0; i < feedback_array->length(); i += 2) {
           Object* handler = feedback_array->get(i + 1);
-          if (next) __ bind(next.get());
+          if (next && next->is_linked()) __ bind(next.get());
           next.reset(new Label);
           HandleCase(receiver, receiver_map, feedback_array->get(i), handler,
                      &done, next.get());
@@ -1881,17 +1953,26 @@ void FastCodeGenerator::VisitForInPrepare() {
   __ CheckEnumCache(&call_runtime);
 
   __ ldr(r0, FieldMemOperand(r0, HeapObject::kMapOffset));
+  __ mov(r2, r0);
+  __ EnumLength(r2, r2);
+  __ cmp(r2, Operand(0));
+  __ mov(r0, Operand(0), LeaveCC, eq);
+  __ mov(r1, Operand(0), LeaveCC, eq);
+  __ b(&done, eq);
   __ ldr(r1, FieldMemOperand(r0, Map::kDescriptorsOffset));
   __ ldr(r1, FieldMemOperand(r1, DescriptorArray::kEnumCacheOffset));
   __ ldr(r1, FieldMemOperand(r1, DescriptorArray::kEnumCacheBridgeCacheOffset));
   auto reg = bytecode_iterator().GetRegisterOperand(1);
-  __ mov(r2, r0);
-  __ EnumLength(r2, r2);
   __ b(&done);
   __ bind(&call_runtime);
   __ push(r0);
   GetContext(cp);
-  __ CallRuntime(Runtime::kForInPrepare);
+
+  const Runtime::Function* f = Runtime::FunctionForId(Runtime::kForInPrepare);
+  __ mov(r0, Operand(1));
+  __ mov(r1, Operand(ExternalReference(f, isolate())));
+  CEntryStub stub(isolate(), 3, kDontSaveFPRegs);
+  __ Call(stub.GetCode());
   __ bind(&done);
   __ str(r0, MemOperand(fp, reg.ToOperand() << kPointerSizeLog2));
   __ str(r1,
