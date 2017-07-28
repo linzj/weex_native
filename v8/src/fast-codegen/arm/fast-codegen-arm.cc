@@ -146,10 +146,10 @@ void FastCodeGenerator::GenerateEpilogue() {
          LeaveCC);
   __ Jump(lr);
   __ bind(&do_call_interrupt);
-  __ Push(r1);
+  __ Push(r1, r0);
   GetContext(cp);
   __ CallRuntime(Runtime::kInterrupt);
-  __ Pop(r1);
+  __ Pop(r1, r0);
   __ mov(r2, Operand(0));
   __ b(&done_budget_update);
   if (!truncate_slow_.is_linked()) return;
@@ -1207,8 +1207,10 @@ void FastCodeGenerator::VisitInvokeIntrinsic() {
 }
 
 void FastCodeGenerator::VisitConstruct() {
-  Callable callable = CodeFactory::InterpreterPushArgsAndConstruct(
+  Callable callable_other = CodeFactory::InterpreterPushArgsAndConstruct(
       isolate(), InterpreterPushArgsMode::kOther);
+  Callable callable_function = CodeFactory::InterpreterPushArgsAndConstruct(
+      isolate(), InterpreterPushArgsMode::kJSFunction);
   // new target r3
   __ mov(r3, kInterpreterAccumulatorRegister);
   // argument count r0.
@@ -1221,7 +1223,20 @@ void FastCodeGenerator::VisitConstruct() {
   __ add(r4, fp, Operand(bytecode_iterator().GetRegisterOperand(1).ToOperand()
                          << kPointerSizeLog2));
   GetContext(cp);
-  __ Call(callable.code());
+  __ SmiTst(r1);
+  Label call_other, done;
+  __ b(&call_other, eq);
+  __ ldr(r9, FieldMemOperand(r1, HeapObject::kMapOffset));
+  __ ldrb(r9, FieldMemOperand(r9, Map::kInstanceTypeOffset));
+  __ cmp(r9, Operand(JS_FUNCTION_TYPE));
+  __ b(&call_other, ne);
+  __ Call(callable_function.code());
+  __ b(&done);
+  __ bind(&call_other);
+  __ Call(callable_other.code());
+  __ bind(&done);
+  __ CompareRoot(kInterpreterAccumulatorRegister, Heap::kUndefinedValueRootIndex);
+  __ Check(ne, kExpectedUndefinedOrCell); //Actully kNotExpectedUndefinedOrCell
 }
 
 void FastCodeGenerator::VisitThrow() {

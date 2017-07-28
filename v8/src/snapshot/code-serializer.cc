@@ -119,6 +119,11 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
     SharedFunctionInfo* function_info =
         reinterpret_cast<SharedFunctionInfo*>(obj);
     function_info->ClearOptimizedCodeMap();
+    Object* function_data = function_info->function_data();
+    if (function_data->IsBytecodeArray()) {
+      BytecodeArray* bytecode_array = BytecodeArray::cast(function_data);
+      bytecode_array->set_interrupt_budget(FLAG_interrupt_budget);
+    }
   } else if (obj->IsJSFunction()) {
     JSFunction* function = reinterpret_cast<JSFunction*>(obj);
     function->ClearTypeFeedbackInfo();
