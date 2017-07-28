@@ -122,6 +122,10 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
   } else if (obj->IsJSFunction()) {
     JSFunction* function = reinterpret_cast<JSFunction*>(obj);
     function->ClearTypeFeedbackInfo();
+    if (function->code()->kind() == Code::FAST_BYTECODE_FUNCTION) {
+      function->set_code(
+          isolate_->builtins()->builtin(Builtins::kInterpreterEntryTrampoline));
+    }
   }
 
   // Past this point we should not see any (context-specific) maps anymore.
