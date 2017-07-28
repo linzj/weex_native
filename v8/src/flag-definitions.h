@@ -589,7 +589,7 @@ DEFINE_BOOL(print_wasm_code, false, "Print WebAssembly code")
 // Profiler flags.
 DEFINE_INT(frame_count, 1, "number of stack frames inspected by the profiler")
 // 0x1800 fits in the immediate field of an ARM instruction.
-DEFINE_INT(interrupt_budget, 0x100,
+DEFINE_INT(interrupt_budget, 0x1200,
            "execution budget before interrupt is triggered")
 DEFINE_INT(type_info_threshold, 25,
            "percentage of ICs that must have type info to allow optimization")

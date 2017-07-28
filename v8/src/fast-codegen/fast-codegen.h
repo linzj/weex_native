@@ -16,13 +16,13 @@ class CompilationInfo;
 class Code;
 class LabelRecorder;
 class Callable;
+class JSFunction;
 
 class FastCodeGenerator {
  public:
-  explicit FastCodeGenerator(CompilationInfo* info);
+  explicit FastCodeGenerator(Handle<JSFunction> closure);
   ~FastCodeGenerator();
 
-  CompilationInfo* info() { return info_; }
   Handle<Code> Generate();
   inline Isolate* isolate() { return isolate_; }
 
@@ -77,12 +77,12 @@ class FastCodeGenerator {
   void HandleCase(const Register& receiver, const Register& receiver_map,
                   Object* feedback, Object* handler, Label* done, Label* next);
 
-  MacroAssembler masm_;
-  CompilationInfo* info_;
   Isolate* isolate_;
+  MacroAssembler masm_;
   Handle<BytecodeArray> bytecode_array_;
   Label return_;
   Label truncate_slow_;
+  Handle<JSFunction> closure_;
   std::unique_ptr<interpreter::BytecodeArrayIterator> bytecode_iterator_;
   std::unique_ptr<LabelRecorder> label_recorder_;
   DISALLOW_COPY_AND_ASSIGN(FastCodeGenerator);  // NOLINT

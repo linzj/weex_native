@@ -1,5 +1,4 @@
 #include "src/code-factory.h"
-#include "src/compilation-info.h"
 #include "src/fast-codegen/fast-codegen.h"
 #include "src/fast-codegen/label-recorder.h"
 #include "src/feedback-vector.h"
@@ -15,19 +14,18 @@
 namespace v8 {
 namespace internal {
 static const int kInitialBufferSize = 4 * KB;
-FastCodeGenerator::FastCodeGenerator(CompilationInfo* info)
-    : masm_(info->isolate(), NULL, kInitialBufferSize,
-            CodeObjectRequired::kYes),
-      info_(info) {}
+FastCodeGenerator::FastCodeGenerator(Handle<JSFunction> closure)
+    : isolate_(closure->GetIsolate()),
+      masm_(isolate_, NULL, kInitialBufferSize, CodeObjectRequired::kYes),
+      closure_(closure) {}
 
 FastCodeGenerator::~FastCodeGenerator() {}
 
 Handle<Code> FastCodeGenerator::Generate() {
   DCHECK(kInterpreterAccumulatorRegister.is(r0));
-  Isolate* isolate = info()->isolate();
-  isolate_ = isolate;
+  Isolate* isolate = isolate_;
   HandleScope handle_scope(isolate);
-  Object* maybe_byte_code_array = info()->shared_info()->function_data();
+  Object* maybe_byte_code_array = closure_->shared()->function_data();
   DCHECK(maybe_byte_code_array->IsBytecodeArray());
   bytecode_array_ = handle(BytecodeArray::cast(maybe_byte_code_array));
   FrameScope frame_scope(&masm_, StackFrame::MANUAL);
@@ -130,6 +128,15 @@ void FastCodeGenerator::GenerateBody() {
 
 void FastCodeGenerator::GenerateEpilogue() {
   __ bind(&return_);
+  // update budget here
+  LoadRegister(interpreter::Register::bytecode_array(), r1);
+  int subtraction = bytecode_iterator().current_offset();
+  Label done_budget_update, do_call_interrupt;
+  __ ldr(r2, FieldMemOperand(r1, BytecodeArray::kInterruptBudgetOffset));
+  __ sub(r2, r2, Operand(subtraction), SetCC);
+  __ b(&do_call_interrupt, le);
+  __ bind(&done_budget_update);
+  __ str(r2, FieldMemOperand(r1, BytecodeArray::kInterruptBudgetOffset));
   // Leave the frame (also dropping the register file).
   __ LeaveFrame(StackFrame::JAVA_SCRIPT);
 
@@ -138,6 +145,14 @@ void FastCodeGenerator::GenerateEpilogue() {
          Operand(bytecode_array_->parameter_count() << kPointerSizeLog2),
          LeaveCC);
   __ Jump(lr);
+  __ bind(&do_call_interrupt);
+  __ Push(r1);
+  GetContext(cp);
+  __ CallRuntime(Runtime::kInterrupt);
+  __ Pop(r1);
+  __ mov(r2, Operand(0));
+  __ b(&done_budget_update);
+  if (!truncate_slow_.is_linked()) return;
   __ bind(&truncate_slow_);
   // r9 is the addr register, do not clobber.
   Label not_heap_number, not_oddball;
@@ -747,7 +762,7 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
 #if defined(ENABLE_IC)
   Register receiver_map = r4;
   Register map_flags = r3;
-  Handle<JSFunction> closure = info()->closure();
+  Handle<JSFunction> closure = closure_;
   FeedbackSlot slot(bytecode_iterator().GetIndexOperand(2) -
                     FeedbackVector::kReservedIndexCount);
   LoadICNexus load_ic_nexus(closure->feedback_vector(), slot);
@@ -1065,7 +1080,7 @@ void FastCodeGenerator::VisitCreateObjectLiteral() {
     __ mov(r2, Operand(Smi::FromInt(literal_index)));
     __ mov(r1, Operand(constant_elements));
     __ push(r0);
-    __ mov(r0, Operand(flags));
+    __ mov(r0, Operand(Smi::FromInt(flags)));
     Callable callable = CodeFactory::FastCloneShallowObject(
         isolate_, fast_clone_properties_count);
     GetContext(cp);

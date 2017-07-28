@@ -954,8 +954,8 @@ void InterpreterAssembler::UpdateInterruptBudget(Node* weight, bool backward) {
   } else {
     new_budget.Bind(Int32Add(old_budget, weight));
   }
-  Node* condition =
-      Int32GreaterThanOrEqual(new_budget.value(), Int32Constant(0));
+  Node* condition = Int32GreaterThanOrEqual(
+      new_budget.value(), Int32Constant(FLAG_interrupt_budget - 0x200));
   Branch(condition, &ok, &interrupt_check);
 
   // Perform interrupt and reset budget.
