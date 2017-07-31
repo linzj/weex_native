@@ -20,7 +20,7 @@ class JSFunction;
 
 class FastCodeGenerator {
  public:
-  explicit FastCodeGenerator(Handle<JSFunction> closure);
+  explicit FastCodeGenerator(Handle<JSFunction> closure, bool for_transition);
   ~FastCodeGenerator();
 
   Handle<Code> Generate();
@@ -83,6 +83,7 @@ class FastCodeGenerator {
   Label return_;
   Label truncate_slow_;
   Handle<JSFunction> closure_;
+  bool for_transition_;
   std::unique_ptr<interpreter::BytecodeArrayIterator> bytecode_iterator_;
   std::unique_ptr<LabelRecorder> label_recorder_;
   DISALLOW_COPY_AND_ASSIGN(FastCodeGenerator);  // NOLINT

@@ -844,17 +844,17 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
   }
 
   VMState<COMPILER> state(isolate);
-  if (mode == Compiler::CONCURRENT &&
-      function->shared()->code() ==
-          isolate->builtins()->builtin(
-              Builtins::kInterpreterEntryTrampoline)) {
+  if (mode == Compiler::CONCURRENT && function->shared()->IsInterpreted()) {
     Object* maybe_byte_code_array = function->shared()->function_data();
     DCHECK(maybe_byte_code_array->IsBytecodeArray());
     BytecodeArray* bytecode_array = BytecodeArray::cast(maybe_byte_code_array);
-    if (bytecode_array->interrupt_budget() > 0) {
+    if (bytecode_array->interrupt_budget() !=
+        interpreter::Interpreter::InterruptBudget()) {
+
       TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
-      FastCodeGenerator fcg(function);
-      return fcg.Generate();
+      FastCodeGenerator fcg(function, false);
+      Handle<Code> code = fcg.Generate();
+      return code;
     }
   }
   DCHECK(!isolate->has_pending_exception());
@@ -934,9 +934,12 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
     if (GetOptimizedCodeLater(job.get())) {
       job.release();  // The background recompile job owns this now.
       // do fast code gen here.
-      if (function->code()->kind() == Code::FAST_BYTECODE_FUNCTION)
-        return Handle<Code>(function->code(), isolate);
-      return isolate->builtins()->InOptimizationQueue();
+
+      TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
+      FastCodeGenerator fcg(function, true);
+      Handle<Code> code = fcg.Generate();
+      return code;
+      // return isolate->builtins()->InOptimizationQueue();
     }
   } else {
     if (GetOptimizedCodeNow(job.get())) return info->code();
@@ -1486,6 +1489,9 @@ bool Compiler::EnsureDeoptimizationSupport(CompilationInfo* info) {
 // static
 Compiler::CompilationTier Compiler::NextCompilationTier(JSFunction* function) {
   Handle<SharedFunctionInfo> shared(function->shared(), function->GetIsolate());
+  if (function->code()->kind() == Code::FAST_BYTECODE_FUNCTION) {
+    return OPTIMIZED;
+  }
   if (shared->IsInterpreted()) {
     if (UseTurboFan(shared)) {
       return OPTIMIZED;

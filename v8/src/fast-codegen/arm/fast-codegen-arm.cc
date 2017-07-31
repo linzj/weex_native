@@ -7,6 +7,7 @@
 #include "src/interpreter/bytecode-array-iterator.h"
 #include "src/interpreter/bytecode-flags.h"
 #include "src/interpreter/bytecodes.h"
+#include "src/interpreter/interpreter.h"
 #include "src/objects.h"
 
 #define __ masm_.
@@ -14,10 +15,12 @@
 namespace v8 {
 namespace internal {
 static const int kInitialBufferSize = 4 * KB;
-FastCodeGenerator::FastCodeGenerator(Handle<JSFunction> closure)
+FastCodeGenerator::FastCodeGenerator(Handle<JSFunction> closure,
+                                     bool for_transition)
     : isolate_(closure->GetIsolate()),
       masm_(isolate_, NULL, kInitialBufferSize, CodeObjectRequired::kYes),
-      closure_(closure) {}
+      closure_(closure),
+      for_transition_(for_transition) {}
 
 FastCodeGenerator::~FastCodeGenerator() {}
 
@@ -58,6 +61,35 @@ Handle<Code> FastCodeGenerator::Generate() {
 // The function builds an interpreter frame.  See InterpreterFrameConstants in
 // frames.h for its layout.
 void FastCodeGenerator::GeneratePrologue() {
+  Label stack_ok;
+  __ LoadRoot(ip, Heap::kStackLimitRootIndex);
+  __ cmp(sp, Operand(ip));
+  __ b(hs, &stack_ok);
+
+  {
+    FrameAndConstantPoolScope scope(&masm_, StackFrame::INTERNAL);
+    // Push the number of arguments to the callee.
+    __ SmiTag(r0);
+    __ push(r0);
+    // Push a copy of the target function and the new target.
+    __ push(r1);
+    __ push(r3);
+    // Push function as parameter to the runtime call.
+    __ Push(r1);
+
+    __ CallRuntime(Runtime::kTryInstallOptimizedCode, 1);
+    __ mov(r2, r0);
+
+    // Restore target function and new target.
+    __ pop(r3);
+    __ pop(r1);
+    __ pop(r0);
+    __ SmiUntag(r0, r0);
+  }
+  __ add(r2, r2, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ Jump(r2);
+
+  __ bind(&stack_ok);
   // Open a frame scope to indicate that there is a frame on the stack.  The
   // MANUAL indicates that the scope shouldn't actually generate code to set up
   // the frame (that is done below).
@@ -132,26 +164,29 @@ void FastCodeGenerator::GenerateEpilogue() {
   LoadRegister(interpreter::Register::bytecode_array(), r1);
   int subtraction = bytecode_iterator().current_offset();
   Label done_budget_update, do_call_interrupt;
-  __ ldr(r2, FieldMemOperand(r1, BytecodeArray::kInterruptBudgetOffset));
-  __ sub(r2, r2, Operand(subtraction), SetCC);
-  __ b(&do_call_interrupt, le);
-  __ bind(&done_budget_update);
-  __ str(r2, FieldMemOperand(r1, BytecodeArray::kInterruptBudgetOffset));
+  if (!for_transition_) {
+    __ ldr(r2, FieldMemOperand(r1, BytecodeArray::kInterruptBudgetOffset));
+    __ sub(r2, r2, Operand(subtraction), SetCC);
+    __ b(&do_call_interrupt, le);
+    __ bind(&done_budget_update);
+    __ str(r2, FieldMemOperand(r1, BytecodeArray::kInterruptBudgetOffset));
+  }
   // Leave the frame (also dropping the register file).
   __ LeaveFrame(StackFrame::JAVA_SCRIPT);
-
   // Drop receiver + arguments.
   __ add(sp, sp,
          Operand(bytecode_array_->parameter_count() << kPointerSizeLog2),
          LeaveCC);
   __ Jump(lr);
-  __ bind(&do_call_interrupt);
-  __ Push(r1, r0);
-  GetContext(cp);
-  __ CallRuntime(Runtime::kInterrupt);
-  __ Pop(r1, r0);
-  __ mov(r2, Operand(0));
-  __ b(&done_budget_update);
+  if (!for_transition_) {
+    __ bind(&do_call_interrupt);
+    __ Push(r1, r0);
+    GetContext(cp);
+    __ CallRuntime(Runtime::kInterrupt);
+    __ Pop(r1, r0);
+    __ mov(r2, Operand(interpreter::Interpreter::InterruptBudget()));
+    __ b(&done_budget_update);
+  }
   if (!truncate_slow_.is_linked()) return;
   __ bind(&truncate_slow_);
   // r9 is the addr register, do not clobber.
@@ -1235,8 +1270,10 @@ void FastCodeGenerator::VisitConstruct() {
   __ bind(&call_other);
   __ Call(callable_other.code());
   __ bind(&done);
-  __ CompareRoot(kInterpreterAccumulatorRegister, Heap::kUndefinedValueRootIndex);
-  __ Check(ne, kExpectedUndefinedOrCell); //Actully kNotExpectedUndefinedOrCell
+  __ CompareRoot(kInterpreterAccumulatorRegister,
+                 Heap::kUndefinedValueRootIndex);
+  __ Check(ne, kExpectedUndefinedOrCell);  // Actully
+                                           // kNotExpectedUndefinedOrCell
 }
 
 void FastCodeGenerator::VisitThrow() {
