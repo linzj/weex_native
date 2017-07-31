@@ -955,14 +955,16 @@ void InterpreterAssembler::UpdateInterruptBudget(Node* weight, bool backward) {
     new_budget.Bind(Int32Add(old_budget, weight));
   }
   Node* condition = Int32GreaterThanOrEqual(
-      new_budget.value(), Int32Constant(Interpreter::InterruptBudget() / 2));
+      new_budget.value(), Int32Constant(Interpreter::InterruptBudget() / 4));
   Branch(condition, &ok, &interrupt_check);
 
   // Perform interrupt and reset budget.
   Bind(&interrupt_check);
   {
-    CallRuntime(Runtime::kInterrupt, GetContext());
-    new_budget.Bind(Int32Constant(Interpreter::InterruptBudget() / 2));
+    Node* function = LoadRegister(Register::function_closure());
+    CallRuntime(Runtime::kRecompileFast, GetContext(), function);
+    // CallRuntime(Runtime::kInterrupt, GetContext());
+    new_budget.Bind(Int32Constant(Interpreter::InterruptBudget()));
     Goto(&ok);
   }
 

@@ -61,35 +61,37 @@ Handle<Code> FastCodeGenerator::Generate() {
 // The function builds an interpreter frame.  See InterpreterFrameConstants in
 // frames.h for its layout.
 void FastCodeGenerator::GeneratePrologue() {
-  Label stack_ok;
-  __ LoadRoot(ip, Heap::kStackLimitRootIndex);
-  __ cmp(sp, Operand(ip));
-  __ b(hs, &stack_ok);
+  if (for_transition_) {
+    Label stack_ok;
+    __ LoadRoot(ip, Heap::kStackLimitRootIndex);
+    __ cmp(sp, Operand(ip));
+    __ b(hs, &stack_ok);
 
-  {
-    FrameAndConstantPoolScope scope(&masm_, StackFrame::INTERNAL);
-    // Push the number of arguments to the callee.
-    __ SmiTag(r0);
-    __ push(r0);
-    // Push a copy of the target function and the new target.
-    __ push(r1);
-    __ push(r3);
-    // Push function as parameter to the runtime call.
-    __ Push(r1);
+    {
+      FrameAndConstantPoolScope scope(&masm_, StackFrame::INTERNAL);
+      // Push the number of arguments to the callee.
+      __ SmiTag(r0);
+      __ push(r0);
+      // Push a copy of the target function and the new target.
+      __ push(r1);
+      __ push(r3);
+      // Push function as parameter to the runtime call.
+      __ Push(r1);
 
-    __ CallRuntime(Runtime::kTryInstallOptimizedCode, 1);
-    __ mov(r2, r0);
+      __ CallRuntime(Runtime::kTryInstallOptimizedCode, 1);
+      __ mov(r2, r0);
 
-    // Restore target function and new target.
-    __ pop(r3);
-    __ pop(r1);
-    __ pop(r0);
-    __ SmiUntag(r0, r0);
+      // Restore target function and new target.
+      __ pop(r3);
+      __ pop(r1);
+      __ pop(r0);
+      __ SmiUntag(r0, r0);
+    }
+    __ add(r2, r2, Operand(Code::kHeaderSize - kHeapObjectTag));
+    __ Jump(r2);
+
+    __ bind(&stack_ok);
   }
-  __ add(r2, r2, Operand(Code::kHeaderSize - kHeapObjectTag));
-  __ Jump(r2);
-
-  __ bind(&stack_ok);
   // Open a frame scope to indicate that there is a frame on the stack.  The
   // MANUAL indicates that the scope shouldn't actually generate code to set up
   // the frame (that is done below).

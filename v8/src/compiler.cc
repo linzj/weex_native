@@ -844,19 +844,6 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
   }
 
   VMState<COMPILER> state(isolate);
-  if (mode == Compiler::CONCURRENT && function->shared()->IsInterpreted()) {
-    Object* maybe_byte_code_array = function->shared()->function_data();
-    DCHECK(maybe_byte_code_array->IsBytecodeArray());
-    BytecodeArray* bytecode_array = BytecodeArray::cast(maybe_byte_code_array);
-    if (bytecode_array->interrupt_budget() !=
-        interpreter::Interpreter::InterruptBudget()) {
-
-      TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
-      FastCodeGenerator fcg(function, false);
-      Handle<Code> code = fcg.Generate();
-      return code;
-    }
-  }
   DCHECK(!isolate->has_pending_exception());
   PostponeInterruptsScope postpone(isolate);
   bool use_turbofan = UseTurboFan(shared) || ignition_osr;

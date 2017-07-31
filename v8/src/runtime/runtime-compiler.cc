@@ -9,6 +9,7 @@
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 #include "src/compiler.h"
 #include "src/deoptimizer.h"
+#include "src/fast-codegen/fast-codegen.h"
 #include "src/frames-inl.h"
 #include "src/full-codegen/full-codegen.h"
 #include "src/isolate-inl.h"
@@ -404,6 +405,25 @@ RUNTIME_FUNCTION(Runtime_TryInstallOptimizedCode) {
                                    : function->shared()->code();
 }
 
+RUNTIME_FUNCTION(Runtime_RecompileFast) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
+  const bool is_interpreted = function->shared()->IsInterpreted();
+  if (!is_interpreted) return function->code();
+
+  FeedbackVector* vector = function->feedback_vector();
+  int with = 0, gen = 0, type_vector_ic_count = 0;
+
+  vector->ComputeCounts(&with, &gen, &type_vector_ic_count, is_interpreted);
+  if ((100 * with / type_vector_ic_count) < FLAG_type_info_threshold)
+    return function->code();
+  TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
+  FastCodeGenerator fcg(function, false);
+  Handle<Code> code = fcg.Generate();
+  function->ReplaceCode(*code);
+  return function->code();
+}
 
 bool CodeGenerationFromStringsAllowed(Isolate* isolate,
                                       Handle<Context> context) {
