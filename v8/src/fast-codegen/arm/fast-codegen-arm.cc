@@ -620,7 +620,6 @@ ICGenerator::ICGenerator(FastCodeGenerator& fcg,
 
 static bool CanManageSmiHandlerCase(int handler_word) {
   if (LoadHandler::IsDoubleBits::decode(handler_word)) return false;
-  if (LoadHandler::IsAccessorInfoBits::decode(handler_word)) return false;
   return true;
 }
 
@@ -643,7 +642,15 @@ void ICGenerator::DoLoadConstant(Handle<Object> _map, int handler_word) {
   DescriptorArray* desc_array = map->instance_descriptors();
   int index = LoadHandler::DescriptorBits::decode(handler_word);
   Handle<Object> constant(desc_array->GetValue(index), isolate());
-  __ mov(kInterpreterAccumulatorRegister, Operand(constant), LeaveCC, eq);
+  if (LoadHandler::IsAccessorInfoBits::decode(handler_word)) {
+    Callable callable = CodeFactory::ApiGetter(isolate());
+    // receiver register is the same.
+    __ mov(ApiGetterDescriptor::HolderRegister(), receiver_);
+    __ mov(ApiGetterDescriptor::CallbackRegister(), Operand(constant));
+    __ Call(callable.code());
+  } else {
+    __ mov(kInterpreterAccumulatorRegister, Operand(constant), LeaveCC, eq);
+  }
   __ b(done_, eq);
 }
 
