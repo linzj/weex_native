@@ -349,88 +349,18 @@ void FastCodeGenerator::SetContext(Register in) {
 void FastCodeGenerator::BuildLoadGlobal(Register out, int slot_operand_index,
                                         int name_operand_index,
                                         TypeofMode typeof_mode) {
-  Register feedback_vector_reg = r2;
-  LoadFeedbackVector(feedback_vector_reg);
-  uint32_t feedback_slot =
-      bytecode_iterator().GetIndexOperand(slot_operand_index);
+  Callable ic =
+      CodeFactory::LoadGlobalICInOptimizedCode(isolate(), typeof_mode);
 
-  Label try_handler, miss, done_try_property, done;
-
-  // Fast path without frame construction for the data case.
-  {
-    Comment cmnt(&masm_, "LoadGlobalIC_TryPropertyCellCase");
-    Register weakcell_reg = r0;
-    Register value_reg = r0;
-    LoadFixedArrayElement(feedback_vector_reg, weakcell_reg, feedback_slot, 0);
-
-    // Load value or try handler case if the {weak_cell} is cleared.
-    LoadWeakCellValue(weakcell_reg, value_reg, &try_handler);
-
-    LoadObjectField(value_reg, out, PropertyCell::kValueOffset);
-    __ JumpIfRoot(out, Heap::kTheHoleValueRootIndex, &miss);
-    __ b(&done_try_property);
-  }
-
-  // Slow path with frame construction.
-  {
-    __ bind(&try_handler);
-    // {
-    //   GetContext(r1);
-    //   Register symbol
-    //   Handle<Object> name =
-    //   bytecode_iterator().GetConstantForIndexOperand(name_operand_index);
-
-    //   AccessorAssembler::LoadICParameters params(context, nullptr, name,
-    //                                              smi_slot, feedback_vector);
-    //   Label call_handler;
-
-    //   Node* handler =
-    //       LoadFixedArrayElement(feedback_vector, p->slot, kPointerSize,
-    //       SMI_PARAMETERS);
-    //   CSA_ASSERT(this, Word32BinaryNot(TaggedIsSmi(handler)));
-    //   GotoIf(WordEqual(handler,
-    //   LoadRoot(Heap::kuninitialized_symbolRootIndex)),
-    //          miss);
-    //   GotoIf(IsCodeMap(LoadMap(handler)), &call_handler);
-
-    //   bool throw_reference_error_if_nonexistent = typeof_mode ==
-    //   NOT_INSIDE_TYPEOF;
-    //   HandleLoadGlobalICHandlerCase(p, handler, miss, exit_point,
-    //                                 throw_reference_error_if_nonexistent);
-
-    //   Bind(&call_handler);
-    //   {
-    //     LoadWithVectorDescriptor descriptor(isolate());
-    //     Node* native_context = LoadNativeContext(p->context);
-    //     Node* receiver =
-    //         LoadContextElement(native_context, Context::EXTENSION_INDEX);
-    //     exit_point->ReturnCallStub(descriptor, handler, p->context, receiver,
-    //                                p->name, p->slot, p->vector);
-    //   }
-    // }
-
-    __ bind(&miss);
-    {
-      Register context_reg = cp;
-      Register name_reg = r1;
-      Register smi_slot_reg = r1;
-      GetContext(context_reg);
-
-      Handle<Object> name =
-          bytecode_iterator().GetConstantForIndexOperand(name_operand_index);
-      __ mov(name_reg, Operand(name));
-      __ push(name_reg);
-
-      __ mov(smi_slot_reg, Operand(Smi::FromInt(feedback_slot)));
-      __ push(smi_slot_reg);
-      __ push(feedback_vector_reg);
-      __ CallRuntime(Runtime::kLoadGlobalIC_Miss);
-      DCHECK(out.is(r0));
-    }
-
-    __ bind(&done);
-    __ bind(&done_try_property);
-  }
+  Handle<Object> name =
+      bytecode_iterator().GetConstantForIndexOperand(name_operand_index);
+  __ mov(LoadWithVectorDescriptor::NameRegister(), Operand(name));
+  __ mov(LoadWithVectorDescriptor::SlotRegister(),
+         Operand(Smi::FromInt(
+             bytecode_iterator().GetIndexOperand(slot_operand_index))));
+  LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
+  GetContext(cp);
+  __ Call(ic.code());
 }
 
 void FastCodeGenerator::VisitLdaGlobal() {
@@ -2055,7 +1985,11 @@ void FastCodeGenerator::VisitSetPendingMessage() {
   __ mov(r0, r2);
 }
 
-void FastCodeGenerator::VisitReturn() { __ b(&return_); }
+void FastCodeGenerator::VisitReturn() {
+  if (bytecode_iterator().current_offset() + 1 == bytecode_array_->length())
+    return;
+  __ b(&return_);
+}
 
 void FastCodeGenerator::VisitDebugger() {
   Callable callable = CodeFactory::HandleDebuggerStatement(isolate_);
