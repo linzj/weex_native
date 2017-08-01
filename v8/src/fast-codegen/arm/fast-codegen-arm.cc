@@ -588,13 +588,18 @@ class ICGenerator {
     return *fcg_.bytecode_iterator_.get();
   }
   void GeneratePrologueIfNeeded();
-  void DoLoadField(int handler_word);
-  void HandleSmiCase(Object* feedback, Object* smi);
+  void DoLoadField(Register recevier, int handler_word);
+  inline void DoLoadField(int handler_word) {
+    DoLoadField(receiver_, handler_word);
+  }
+  bool HandleSmiCase(Object* feedback, Object* smi);
   void DoLoadConstant(Handle<Object> map, int handler_word);
   void DoNormalLoad();
   void HandleCase(Object* feedback, Object* handler);
   void LoadFixedArrayElementSmiIndex(Register array, Register to,
                                      Register index, int additional_offset);
+  bool HandleCodeHandler(Object* feedback, Object* handler);
+  bool HandleTupleHandler(Object* feedback, Object* handler);
   Register receiver_ = LoadWithVectorDescriptor::ReceiverRegister();
   Register receiver_map_ = r4;
   FastCodeGenerator& fcg_;
@@ -623,14 +628,14 @@ static bool CanManageSmiHandlerCase(int handler_word) {
   return true;
 }
 
-void ICGenerator::DoLoadField(int handler_word) {
+void ICGenerator::DoLoadField(Register receiver, int handler_word) {
   int offset = LoadHandler::FieldOffsetBits::decode(handler_word);
   if (LoadHandler::IsInobjectBits::decode(handler_word)) {
-    __ ldr(kInterpreterAccumulatorRegister, FieldMemOperand(receiver_, offset),
+    __ ldr(kInterpreterAccumulatorRegister, FieldMemOperand(receiver, offset),
            eq);
   } else {
     __ ldr(kInterpreterAccumulatorRegister,
-           FieldMemOperand(receiver_, JSObject::kPropertiesOffset), eq);
+           FieldMemOperand(receiver, JSObject::kPropertiesOffset), eq);
     __ ldr(kInterpreterAccumulatorRegister,
            FieldMemOperand(kInterpreterAccumulatorRegister, offset), eq);
   }
@@ -643,15 +648,17 @@ void ICGenerator::DoLoadConstant(Handle<Object> _map, int handler_word) {
   int index = LoadHandler::DescriptorBits::decode(handler_word);
   Handle<Object> constant(desc_array->GetValue(index), isolate());
   if (LoadHandler::IsAccessorInfoBits::decode(handler_word)) {
+    __ b(next_, ne);
     Callable callable = CodeFactory::ApiGetter(isolate());
     // receiver register is the same.
     __ mov(ApiGetterDescriptor::HolderRegister(), receiver_);
     __ mov(ApiGetterDescriptor::CallbackRegister(), Operand(constant));
     __ Call(callable.code());
+    __ b(done_);
   } else {
     __ mov(kInterpreterAccumulatorRegister, Operand(constant), LeaveCC, eq);
+    __ b(done_, eq);
   }
-  __ b(done_, eq);
 }
 
 void ICGenerator::DoNormalLoad() {
@@ -723,12 +730,12 @@ void ICGenerator::DoNormalLoad() {
   __ b(done_);
 }
 
-void ICGenerator::HandleSmiCase(Object* feedback, Object* smi) {
+bool ICGenerator::HandleSmiCase(Object* feedback, Object* smi) {
   WeakCell* weak_cell = WeakCell::cast(feedback);
-  if (weak_cell->cleared()) return;
+  if (weak_cell->cleared()) return false;
   Handle<Object> map(weak_cell->value(), isolate());
   int handler_word = Smi::cast(smi)->value();
-  if (!CanManageSmiHandlerCase(handler_word)) return;
+  if (!CanManageSmiHandlerCase(handler_word)) return false;
   GeneratePrologueIfNeeded();
   __ cmp(receiver_map_, Operand(map));
   int handler_kind = LoadHandler::KindBits::decode(handler_word);
@@ -738,28 +745,119 @@ void ICGenerator::HandleSmiCase(Object* feedback, Object* smi) {
     DoLoadConstant(map, handler_word);
   else
     DoNormalLoad();
+  return true;
 }
 
-void ICGenerator::HandleCase(Object* feedback, Object* handler) {
-  if (handler->IsSmi() && handler != nullptr) HandleSmiCase(feedback, handler);
-  if (handler->IsCode()) {
-    GeneratePrologueIfNeeded();
-    // recevier already in position.
-    WeakCell* weak_cell = WeakCell::cast(feedback);
-    if (weak_cell->cleared()) return;
-    Handle<Object> map(weak_cell->value(), isolate());
+bool ICGenerator::HandleCodeHandler(Object* feedback, Object* handler) {
+  // recevier already in position.
+  WeakCell* weak_cell = WeakCell::cast(feedback);
+  if (weak_cell->cleared()) return false;
+  GeneratePrologueIfNeeded();
+  Handle<Object> map(weak_cell->value(), isolate());
+  __ cmp(receiver_map_, Operand(map));
+  __ b(next_, ne);
+  Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
+  __ mov(LoadWithVectorDescriptor::NameRegister(), Operand(name));
+  __ mov(LoadWithVectorDescriptor::SlotRegister(),
+         Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
+  fcg_.LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
+  fcg_.GetContext(cp);
+  Handle<Object> _code(handler, isolate());
+  __ Call(Handle<Code>::cast(_code));
+  __ b(done_);
+  return true;
+}
+
+bool ICGenerator::HandleTupleHandler(Object* feedback, Object* handler) {
+  WeakCell* weak_cell = WeakCell::cast(feedback);
+  if (weak_cell->cleared()) {
+    return false;
+  }
+  Tuple3* tp3 = Tuple3::cast(handler);
+  Cell* cell = Cell::cast(tp3->value3());
+  if (cell == nullptr || cell->value() != Smi::FromInt(Map::kPrototypeChainValid)) {
+    return false;
+  }
+  Smi* smi = Smi::cast(tp3->value2());
+  int handler_flags = smi->value();
+  if (LoadHandler::DoNegativeLookupOnReceiverBits::decode(handler_flags)) {
+    return false;
+  }
+  Object* maybe_holder_cell = tp3->value1();
+  Handle<Object> map(weak_cell->value(), isolate());
+  if (!maybe_holder_cell->IsSmi()) {
+    int handler_word = handler_flags;
+    if (maybe_holder_cell->IsNull(isolate())) {
+      GeneratePrologueIfNeeded();
+      __ cmp(receiver_map_, Operand(map));
+      __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kUndefinedValueRootIndex, eq);
+      __ b(done_, eq);
+      return true;
+    } else {
+      WeakCell* weakcell = WeakCell::cast(maybe_holder_cell);
+      if (weakcell->cleared()) {
+        return false;
+      }
+      if (!CanManageSmiHandlerCase(handler_word)) {
+        return false;
+      }
+      int handler_kind = LoadHandler::KindBits::decode(handler_word);
+      if (handler_kind == LoadHandler::kForFields) {
+        GeneratePrologueIfNeeded();
+        Handle<Object> holder = Handle<Object>(weakcell->value(), isolate());
+        __ cmp(receiver_map_, Operand(map));
+        __ mov(r0, Operand(holder));
+        DoLoadField(r0, handler_word);
+      }
+      else if (handler_kind == LoadHandler::kForConstants) {
+        GeneratePrologueIfNeeded();
+        __ cmp(receiver_map_, Operand(map));
+        HeapObject* holder = HeapObject::cast(weakcell->value());
+        Handle<Object> map = handle(holder->map());
+        DoLoadConstant(map, handler_word);
+        return true;
+      }
+      else {
+        return false;
+      }
+    }
+  } else {
+    Callable callable = CodeFactory::LoadICProtoArray(isolate(), false);
     __ cmp(receiver_map_, Operand(map));
     __ b(next_, ne);
     Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
-    __ mov(LoadWithVectorDescriptor::NameRegister(), Operand(name));
-    __ mov(LoadWithVectorDescriptor::SlotRegister(),
-           Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
-    fcg_.LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
+    __ mov(LoadICProtoArrayDescriptor::NameRegister(), Operand(name));
+    __ mov(LoadICProtoArrayDescriptor::SlotRegister(),
+        Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
+    Handle<Object> _handler(handler, isolate());
+    __ mov(LoadICProtoArrayDescriptor::HandlerRegister(), Operand(_handler));
+    fcg_.LoadFeedbackVector(LoadICProtoArrayDescriptor::VectorRegister());
     fcg_.GetContext(cp);
-    Handle<Object> _code(handler, isolate());
-    __ Call(Handle<Code>::cast(_code));
+    __ Call(callable.code());
     __ b(done_);
+    return true;
   }
+  return false;
+}
+
+void ICGenerator::HandleCase(Object* feedback, Object* handler) {
+  bool handled = false;
+  if (handler->IsSmi() && handler != nullptr) {
+    handled = HandleSmiCase(feedback, handler);
+  } else if (handler->IsCode()) {
+    handled = HandleCodeHandler(feedback, handler);
+  } else if (handler->IsTuple3()) {
+    handled = HandleTupleHandler(feedback, handler);
+  }
+  (void)handled;
+  // if (!handled) {
+  //   std::unique_ptr<char[]> debug_name = fcg_.closure_->shared()->DebugName()->ToCString();
+
+  //   PrintF("function can not be handle: %s\n", debug_name.get());
+  //   feedback->Print();
+  //   handler->Print();
+  //   fflush(stdout);
+  // }
 }
 
 void ICGenerator::GeneratePrologueIfNeeded() {
