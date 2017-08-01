@@ -1746,19 +1746,15 @@ void FastCodeGenerator::VisitToNumber() {
 }
 
 void FastCodeGenerator::VisitJump() {
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label);
 }
 
 void FastCodeGenerator::VisitJumpConstant() {
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label);
 }
@@ -1766,9 +1762,8 @@ void FastCodeGenerator::VisitJumpConstant() {
 void FastCodeGenerator::VisitJumpIfTrue() {
   __ LoadRoot(r1, Heap::kTrueValueRootIndex);
   __ cmp(kInterpreterAccumulatorRegister, r1);
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label, eq);
 }
@@ -1776,11 +1771,8 @@ void FastCodeGenerator::VisitJumpIfTrue() {
 void FastCodeGenerator::VisitJumpIfTrueConstant() {
   __ LoadRoot(r1, Heap::kTrueValueRootIndex);
   __ cmp(kInterpreterAccumulatorRegister, r1);
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label, eq);
 }
@@ -1788,9 +1780,8 @@ void FastCodeGenerator::VisitJumpIfTrueConstant() {
 void FastCodeGenerator::VisitJumpIfFalse() {
   __ LoadRoot(r1, Heap::kFalseValueRootIndex);
   __ cmp(kInterpreterAccumulatorRegister, r1);
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label, eq);
 }
@@ -1798,33 +1789,35 @@ void FastCodeGenerator::VisitJumpIfFalse() {
 void FastCodeGenerator::VisitJumpIfFalseConstant() {
   __ LoadRoot(r1, Heap::kFalseValueRootIndex);
   __ cmp(kInterpreterAccumulatorRegister, r1);
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label, eq);
 }
 
 void FastCodeGenerator::VisitJumpIfToBooleanTrue() {
-  Label if_false;
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* if_true = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* if_true =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(if_true);
+#if 0
+  Label if_false;
   __ mov(r1, kInterpreterAccumulatorRegister);
   BranchIfToBooleanIsTrue(if_true, &if_false);
   __ bind(&if_false);
+#else
+  __ mov(r9, kInterpreterAccumulatorRegister);
+  Callable callable = CodeFactory::ToBoolean(isolate());
+  __ Call(callable.code());
+  __ CompareRoot(r0, Heap::kTrueValueRootIndex);
+  __ mov(kInterpreterAccumulatorRegister, r9);
+  __ b(if_true, eq);
+#endif
 }
 
 void FastCodeGenerator::VisitJumpIfToBooleanTrueConstant() {
   Label if_false;
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* if_true = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* if_true =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(if_true);
   __ mov(r1, kInterpreterAccumulatorRegister);
   BranchIfToBooleanIsTrue(if_true, &if_false);
@@ -1832,23 +1825,28 @@ void FastCodeGenerator::VisitJumpIfToBooleanTrueConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfToBooleanFalse() {
-  Label if_true;
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* if_false = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* if_false =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(if_false);
+#if 0
+  Label if_true;
   __ mov(r1, kInterpreterAccumulatorRegister);
   BranchIfToBooleanIsTrue(&if_true, if_false);
   __ bind(&if_true);
+#else
+  __ mov(r9, kInterpreterAccumulatorRegister);
+  Callable callable = CodeFactory::ToBoolean(isolate());
+  __ Call(callable.code());
+  __ CompareRoot(r0, Heap::kFalseValueRootIndex);
+  __ mov(kInterpreterAccumulatorRegister, r9);
+  __ b(if_false, eq);
+#endif
 }
 
 void FastCodeGenerator::VisitJumpIfToBooleanFalseConstant() {
   Label if_true;
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* if_false = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* if_false =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(if_false);
   __ mov(r1, kInterpreterAccumulatorRegister);
   BranchIfToBooleanIsTrue(&if_true, if_false);
@@ -1856,9 +1854,8 @@ void FastCodeGenerator::VisitJumpIfToBooleanFalseConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfNotHole() {
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ LoadRoot(r1, Heap::kTheHoleValueRootIndex);
   __ cmp(r1, kInterpreterAccumulatorRegister);
@@ -1866,11 +1863,8 @@ void FastCodeGenerator::VisitJumpIfNotHole() {
 }
 
 void FastCodeGenerator::VisitJumpIfNotHoleConstant() {
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ LoadRoot(r1, Heap::kTheHoleValueRootIndex);
   __ cmp(r1, kInterpreterAccumulatorRegister);
@@ -1878,9 +1872,8 @@ void FastCodeGenerator::VisitJumpIfNotHoleConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfJSReceiver() {
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   Label done;
   __ SmiTst(kInterpreterAccumulatorRegister);
@@ -1894,11 +1887,8 @@ void FastCodeGenerator::VisitJumpIfJSReceiver() {
 }
 
 void FastCodeGenerator::VisitJumpIfJSReceiverConstant() {
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   Label done;
   __ SmiTst(kInterpreterAccumulatorRegister);
@@ -1912,9 +1902,8 @@ void FastCodeGenerator::VisitJumpIfJSReceiverConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfNull() {
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ LoadRoot(r1, Heap::kNullValueRootIndex);
   __ cmp(r1, kInterpreterAccumulatorRegister);
@@ -1922,11 +1911,8 @@ void FastCodeGenerator::VisitJumpIfNull() {
 }
 
 void FastCodeGenerator::VisitJumpIfNullConstant() {
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ LoadRoot(r1, Heap::kNullValueRootIndex);
   __ cmp(r1, kInterpreterAccumulatorRegister);
@@ -1934,9 +1920,8 @@ void FastCodeGenerator::VisitJumpIfNullConstant() {
 }
 
 void FastCodeGenerator::VisitJumpIfUndefined() {
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ LoadRoot(r1, Heap::kUndefinedValueRootIndex);
   __ cmp(r1, kInterpreterAccumulatorRegister);
@@ -1944,11 +1929,8 @@ void FastCodeGenerator::VisitJumpIfUndefined() {
 }
 
 void FastCodeGenerator::VisitJumpIfUndefinedConstant() {
-  Handle<Object> relative_jump_obj =
-      bytecode_iterator().GetConstantForIndexOperand(0);
-  int relative_jump = Handle<Smi>::cast(relative_jump_obj)->value();
-  Label* label = label_recorder_->GetLabel(
-      relative_jump + bytecode_iterator().current_offset());
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ LoadRoot(r1, Heap::kUndefinedValueRootIndex);
   __ cmp(r1, kInterpreterAccumulatorRegister);
@@ -1956,9 +1938,8 @@ void FastCodeGenerator::VisitJumpIfUndefinedConstant() {
 }
 
 void FastCodeGenerator::VisitJumpLoop() {
-  uint32_t relative_jump = bytecode_iterator().GetUnsignedImmediateOperand(0);
-  Label* label = label_recorder_->GetLabel(
-      bytecode_iterator().current_offset() - relative_jump);
+  Label* label =
+      label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(label);
   __ b(label);
 }

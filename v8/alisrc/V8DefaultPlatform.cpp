@@ -563,7 +563,7 @@ v8::platform1::V8DefaultPlatform* CreateV8DefaultPlatform(
   return platform;
 }
 
-const int V8DefaultPlatform::kMaxThreadPoolSize = 4;
+const int V8DefaultPlatform::kMaxThreadPoolSize = 1;
 
 V8DefaultPlatform::V8DefaultPlatform()
     : initialized_(false), thread_pool_size_(0) {}

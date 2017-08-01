@@ -22,42 +22,8 @@ class LabelRecorder {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(LabelRecorder);  // NOLINT
-  void RecordJump(const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpConstant(const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfTrue(const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfTrueConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfFalse(const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfFalseConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfToBooleanTrue(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfToBooleanTrueConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfToBooleanFalse(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfToBooleanFalseConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfNotHole(const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfNotHoleConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfJSReceiver(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfJSReceiverConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfNull(const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfNullConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfUndefined(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpIfUndefinedConstant(
-      const interpreter::BytecodeArrayIterator& iterator);
-  void RecordJumpLoop(const interpreter::BytecodeArrayIterator& iterator);
 
-  void RecordFromImm(const interpreter::BytecodeArrayIterator& iterator,
-                     int index, bool backward = false);
-  void RecordFromConstant(const interpreter::BytecodeArrayIterator& iterator,
-                          int index);
+  void Record(const interpreter::BytecodeArrayIterator& iterator);
   void Record(int offset);
 
   Handle<BytecodeArray> bytecode_array_;

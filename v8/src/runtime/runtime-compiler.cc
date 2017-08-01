@@ -416,12 +416,17 @@ RUNTIME_FUNCTION(Runtime_RecompileFast) {
   int with = 0, gen = 0, type_vector_ic_count = 0;
 
   vector->ComputeCounts(&with, &gen, &type_vector_ic_count, is_interpreted);
-  if ((100 * with / type_vector_ic_count) < FLAG_type_info_threshold)
+  if (type_vector_ic_count != 0 &&
+      ((100 * with / type_vector_ic_count) < FLAG_type_info_threshold)) {
     return function->code();
+  }
   TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
   FastCodeGenerator fcg(function, false);
   Handle<Code> code = fcg.Generate();
   function->ReplaceCode(*code);
+  SharedFunctionInfo* shared_code = function->shared();
+  int ticks = shared_code->profiler_ticks();
+  shared_code->set_profiler_ticks(ticks + 1);
   return function->code();
 }
 

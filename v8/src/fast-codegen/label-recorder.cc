@@ -14,61 +14,61 @@ void LabelRecorder::Record() {
   for (; !iterator.done(); iterator.Advance()) {
     switch (iterator.current_bytecode()) {
       case interpreter::Bytecode::kJump:
-        RecordJump(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpConstant:
-        RecordJumpConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfTrue:
-        RecordJumpIfTrue(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfTrueConstant:
-        RecordJumpIfTrueConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfFalse:
-        RecordJumpIfFalse(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfFalseConstant:
-        RecordJumpIfFalseConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfToBooleanTrue:
-        RecordJumpIfToBooleanTrue(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfToBooleanTrueConstant:
-        RecordJumpIfToBooleanTrueConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfToBooleanFalse:
-        RecordJumpIfToBooleanFalse(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfToBooleanFalseConstant:
-        RecordJumpIfToBooleanFalseConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfNotHole:
-        RecordJumpIfNotHole(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfNotHoleConstant:
-        RecordJumpIfNotHoleConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfJSReceiver:
-        RecordJumpIfJSReceiver(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfJSReceiverConstant:
-        RecordJumpIfJSReceiverConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfNull:
-        RecordJumpIfNull(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfNullConstant:
-        RecordJumpIfNullConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfUndefined:
-        RecordJumpIfUndefined(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpIfUndefinedConstant:
-        RecordJumpIfUndefinedConstant(iterator);
+        Record(iterator);
         break;
       case interpreter::Bytecode::kJumpLoop:
-        RecordJumpLoop(iterator);
+        Record(iterator);
         break;
       default:
         break;
@@ -83,114 +83,9 @@ Label* LabelRecorder::GetLabel(int offset) {
   return nullptr;
 }
 
-void LabelRecorder::RecordJump(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfTrue(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfTrueConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfFalse(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfFalseConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfToBooleanTrue(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfToBooleanTrueConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfToBooleanFalse(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfToBooleanFalseConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfNotHole(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfNotHoleConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfJSReceiver(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfJSReceiverConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfNull(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfNullConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfUndefined(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpIfUndefinedConstant(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromConstant(iterator, 0);
-}
-
-void LabelRecorder::RecordJumpLoop(
-    const interpreter::BytecodeArrayIterator& iterator) {
-  RecordFromImm(iterator, 0, true);
-}
-
-void LabelRecorder::RecordFromImm(
-    const interpreter::BytecodeArrayIterator& iterator, int index, bool backward) {
-  int offset = iterator.GetUnsignedImmediateOperand(index);
-  if (backward)
-    offset = -offset;
-  Record(iterator.current_offset() + offset);
-}
-
-void LabelRecorder::RecordFromConstant(
-    const interpreter::BytecodeArrayIterator& iterator, int index) {
-  Handle<Object> offset = iterator.GetConstantForIndexOperand(index);
-  Handle<Smi> offset_smi = Handle<Smi>::cast(offset);
-  Record(iterator.current_offset() + offset_smi->value());
+void LabelRecorder::Record(const interpreter::BytecodeArrayIterator& iterator) {
+  int offset = iterator.GetJumpTargetOffset();
+  Record(offset);
 }
 
 void LabelRecorder::Record(int offset) {
