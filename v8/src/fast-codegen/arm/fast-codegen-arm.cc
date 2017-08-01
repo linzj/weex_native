@@ -646,39 +646,78 @@ void FastCodeGenerator::VisitStaLookupSlotStrict() {
 
 #define ENABLE_IC
 #if defined(ENABLE_IC)
+class ICGenerator {
+ public:
+  ICGenerator(FastCodeGenerator& fcg, const LoadICNexus& loadic_nexus,
+              Label* slowcase, Label* done);
+  void Generate();
+
+ private:
+  inline Isolate* isolate() { return fcg_.isolate_; }
+  interpreter::BytecodeArrayIterator& bytecode_iterator() const {
+    return *fcg_.bytecode_iterator_.get();
+  }
+  void GeneratePrologueIfNeeded();
+  void DoLoadField(int handler_word);
+  void HandleSmiCase(Object* feedback, Object* smi);
+  void DoLoadConstant(Handle<Object> map, int handler_word);
+  void DoNormalLoad();
+  void HandleCase(Object* feedback, Object* handler);
+  void LoadFixedArrayElementSmiIndex(Register array, Register to,
+                                     Register index, int additional_offset);
+  Register receiver_ = LoadWithVectorDescriptor::ReceiverRegister();
+  Register receiver_map_ = r4;
+  FastCodeGenerator& fcg_;
+  MacroAssembler& masm_;
+  const LoadICNexus loadic_nexus_;
+  Label* slowcase_;
+  Label* done_;
+  Label* next_;
+  bool first_handle_case_;
+  std::unique_ptr<Label> next_storage_;
+};
+
+ICGenerator::ICGenerator(FastCodeGenerator& fcg,
+                         const LoadICNexus& loadic_nexus, Label* slowcase,
+                         Label* done)
+    : fcg_(fcg),
+      masm_(fcg.masm_),
+      loadic_nexus_(loadic_nexus),
+      slowcase_(slowcase),
+      done_(done),
+      next_(nullptr),
+      first_handle_case_(true) {}
+
 static bool CanManageSmiHandlerCase(int handler_word) {
   if (LoadHandler::IsDoubleBits::decode(handler_word)) return false;
   if (LoadHandler::IsAccessorInfoBits::decode(handler_word)) return false;
   return true;
 }
 
-void FastCodeGenerator::DoLoadField(Register receiver, int handler_word,
-                                    Label* done) {
+void ICGenerator::DoLoadField(int handler_word) {
   int offset = LoadHandler::FieldOffsetBits::decode(handler_word);
   if (LoadHandler::IsInobjectBits::decode(handler_word)) {
-    __ ldr(kInterpreterAccumulatorRegister, FieldMemOperand(receiver, offset),
+    __ ldr(kInterpreterAccumulatorRegister, FieldMemOperand(receiver_, offset),
            eq);
   } else {
     __ ldr(kInterpreterAccumulatorRegister,
-           FieldMemOperand(receiver, JSObject::kPropertiesOffset), eq);
+           FieldMemOperand(receiver_, JSObject::kPropertiesOffset), eq);
     __ ldr(kInterpreterAccumulatorRegister,
            FieldMemOperand(kInterpreterAccumulatorRegister, offset), eq);
   }
-  __ b(done, eq);
+  __ b(done_, eq);
 }
 
-void FastCodeGenerator::DoLoadConstant(Handle<Object> _map, int handler_word,
-                                       Label* done) {
+void ICGenerator::DoLoadConstant(Handle<Object> _map, int handler_word) {
   Handle<Map> map = Handle<Map>::cast(_map);
   DescriptorArray* desc_array = map->instance_descriptors();
   int index = LoadHandler::DescriptorBits::decode(handler_word);
   Handle<Object> constant(desc_array->GetValue(index), isolate());
   __ mov(kInterpreterAccumulatorRegister, Operand(constant), LeaveCC, eq);
-  __ b(done, eq);
+  __ b(done_, eq);
 }
 
-void FastCodeGenerator::DoNormalLoad(const Register& receiver, Label* done,
-                                     Label* next) {
+void ICGenerator::DoNormalLoad() {
   Register properties = r9;
   Register key = r1;
   Register value_index = r2;
@@ -692,19 +731,19 @@ void FastCodeGenerator::DoNormalLoad(const Register& receiver, Label* done,
   Register getter_map = r3;
   Register getter_instance_type = r0;
   Register getter_map_bitfield = r0;
-  DCHECK(receiver.is(r1));
-  __ b(next, ne);
-  __ push(receiver);
-  __ ldr(properties, FieldMemOperand(receiver, JSObject::kPropertiesOffset));
+  DCHECK(receiver_.is(r1));
+  __ b(next_, ne);
+  __ push(receiver_);
+  __ ldr(properties, FieldMemOperand(receiver_, JSObject::kPropertiesOffset));
   __ mov(r0, properties);
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
   __ mov(key, Operand(name));
   NameDictionaryLookupStub stub(isolate(),
                                 NameDictionaryLookupStub::POSITIVE_LOOKUP);
   __ Call(stub.GetCode());
-  __ pop(receiver);
+  __ pop(receiver_);
   __ cmp(r0, Operand(0));
-  __ b(next, eq);  // FIXME: should be set to slow case
+  __ b(slowcase_, eq);
   const int kKeyToDetailsOffset =
       (NameDictionary::kEntryDetailsIndex - NameDictionary::kEntryKeyIndex) *
       kPointerSize;
@@ -712,31 +751,31 @@ void FastCodeGenerator::DoNormalLoad(const Register& receiver, Label* done,
       (NameDictionary::kEntryValueIndex - NameDictionary::kEntryKeyIndex) *
       kPointerSize;
   __ mov(value_index_tmp, value_index);
-  LoadFixedArrayElementSmiIndex(properties, details, value_index_tmp,
-                                kKeyToDetailsOffset);
-  LoadFixedArrayElementSmiIndex(properties, value, value_index,
-                                kKeyToValueOffset);
+  fcg_.LoadFixedArrayElementSmiIndex(properties, details, value_index_tmp,
+                                     kKeyToDetailsOffset);
+  fcg_.LoadFixedArrayElementSmiIndex(properties, value, value_index,
+                                     kKeyToValueOffset);
   __ and_(kind, details, Operand(3));
   __ cmp(kind, Operand(kData));
   __ mov(kInterpreterAccumulatorRegister, value, LeaveCC, eq);
-  __ b(done, eq);
+  __ b(done_, eq);
   __ ldr(map, FieldMemOperand(value, HeapObject::kMapOffset));
   __ ldrb(accessor_pair_instance_type,
           FieldMemOperand(map, Map::kInstanceTypeOffset));
   __ cmp(accessor_pair_instance_type, Operand(ACCESSOR_INFO_TYPE));
-  __ b(next, eq);  // FIXME: should be set to slow case
+  __ b(slowcase_, eq);
   __ ldr(getter, FieldMemOperand(value, AccessorPair::kGetterOffset));
   __ ldr(getter_map, FieldMemOperand(getter, HeapObject::kMapOffset));
   __ ldrb(getter_instance_type,
           FieldMemOperand(getter_map, Map::kInstanceTypeOffset));
   __ cmp(getter_instance_type, Operand(FUNCTION_TEMPLATE_INFO_TYPE));
-  __ b(next, eq);  // FIXME: should be set to slow case
+  __ b(slowcase_, eq);
   __ ldrb(getter_map_bitfield,
           FieldMemOperand(getter_map, Map::kBitFieldOffset));
   __ tst(getter_map_bitfield, Operand(1 << Map::kIsCallable));
   __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kUndefinedValueRootIndex,
               eq);
-  __ b(done, eq);
+  __ b(done_, eq);
 
   Callable callable = CodeFactory::Call(isolate());
   __ sub(sp, sp,
@@ -744,81 +783,72 @@ void FastCodeGenerator::DoNormalLoad(const Register& receiver, Label* done,
   __ mov(r0, Operand(0));
   __ mov(r1, getter);
   __ Call(callable.code());
-  __ b(done);
+  __ b(done_);
 }
 
-void FastCodeGenerator::HandleSmiCase(const Register& receiver,
-                                      const Register& receiver_map,
-                                      Object* feedback, Object* smi,
-                                      Label* done, Label* next) {
+void ICGenerator::HandleSmiCase(Object* feedback, Object* smi) {
   WeakCell* weak_cell = WeakCell::cast(feedback);
   if (weak_cell->cleared()) return;
   Handle<Object> map(weak_cell->value(), isolate());
   int handler_word = Smi::cast(smi)->value();
   if (!CanManageSmiHandlerCase(handler_word)) return;
-  __ cmp(receiver_map, Operand(map));
+  GeneratePrologueIfNeeded();
+  __ cmp(receiver_map_, Operand(map));
   int handler_kind = LoadHandler::KindBits::decode(handler_word);
   if (handler_kind == LoadHandler::kForFields)
-    DoLoadField(receiver, handler_word, done);
+    DoLoadField(handler_word);
   else if (handler_kind == LoadHandler::kForConstants)
-    DoLoadConstant(map, handler_word, done);
+    DoLoadConstant(map, handler_word);
   else
-    DoNormalLoad(receiver, done, next);
+    DoNormalLoad();
 }
 
-void FastCodeGenerator::HandleCase(const Register& receiver,
-                                   const Register& receiver_map,
-                                   Object* feedback, Object* handler,
-                                   Label* done, Label* next) {
-  if (handler->IsSmi() && handler != nullptr)
-    HandleSmiCase(receiver, receiver_map, feedback, handler, done, next);
+void ICGenerator::HandleCase(Object* feedback, Object* handler) {
+  if (handler->IsSmi() && handler != nullptr) HandleSmiCase(feedback, handler);
   if (handler->IsCode()) {
+    GeneratePrologueIfNeeded();
     // recevier already in position.
     WeakCell* weak_cell = WeakCell::cast(feedback);
     if (weak_cell->cleared()) return;
     Handle<Object> map(weak_cell->value(), isolate());
-    __ cmp(receiver_map, Operand(map));
-    __ b(next, ne);
+    __ cmp(receiver_map_, Operand(map));
+    __ b(next_, ne);
     Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);
     __ mov(LoadWithVectorDescriptor::NameRegister(), Operand(name));
     __ mov(LoadWithVectorDescriptor::SlotRegister(),
            Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(2))));
-    LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
-    GetContext(cp);
+    fcg_.LoadFeedbackVector(LoadWithVectorDescriptor::VectorRegister());
+    fcg_.GetContext(cp);
     Handle<Object> _code(handler, isolate());
     __ Call(Handle<Code>::cast(_code));
-    __ b(done);
+    __ b(done_);
   }
 }
-#endif  // ENABLE_IC
 
-void FastCodeGenerator::VisitLdaNamedProperty() {
-  Callable ic = CodeFactory::LoadICInOptimizedCode(isolate_);
-  Register receiver = LoadWithVectorDescriptor::ReceiverRegister();
-  LoadRegister(bytecode_iterator().GetRegisterOperand(0), receiver);
-#if defined(ENABLE_IC)
-  Register receiver_map = r4;
+void ICGenerator::GeneratePrologueIfNeeded() {
+  if (!first_handle_case_) return;
+  first_handle_case_ = false;
   Register map_flags = r3;
-  Handle<JSFunction> closure = closure_;
-  FeedbackSlot slot(bytecode_iterator().GetIndexOperand(2) -
-                    FeedbackVector::kReservedIndexCount);
-  LoadICNexus load_ic_nexus(closure->feedback_vector(), slot);
-  Label done, slowpath;
-  __ SmiTst(receiver);
-  __ b(&slowpath, eq);
-  __ ldr(receiver_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
-  __ ldr(map_flags, FieldMemOperand(receiver_map, Map::kBitField3Offset));
+
+  __ SmiTst(receiver_);
+  __ b(slowcase_, eq);
+  __ ldr(receiver_map_, FieldMemOperand(receiver_, HeapObject::kMapOffset));
+  __ ldr(map_flags, FieldMemOperand(receiver_map_, Map::kBitField3Offset));
   uint32_t map_deprecated_mask = Map::Deprecated::encode(1);
   __ tst(map_flags, Operand(map_deprecated_mask));
-  __ b(&slowpath, ne);
-  std::unique_ptr<Label> next;
+  __ b(slowcase_, ne);
+}
+
+void ICGenerator::Generate() {
+  const LoadICNexus& load_ic_nexus = loadic_nexus_;
   switch (load_ic_nexus.ic_state()) {
     case MONOMORPHIC: {
       Object* feedback = load_ic_nexus.GetFeedback();
       Object* feedback_extra = load_ic_nexus.GetFeedbackExtra();
-      if (feedback->IsWeakCell())
-        HandleCase(receiver, receiver_map, feedback, feedback_extra, &done,
-                   &slowpath);
+      if (feedback->IsWeakCell()) {
+        next_ = slowcase_;
+        HandleCase(feedback, feedback_extra);
+      }
     } break;
     case POLYMORPHIC: {
       Object* feedback = load_ic_nexus.GetFeedback();
@@ -826,17 +856,34 @@ void FastCodeGenerator::VisitLdaNamedProperty() {
         FixedArray* feedback_array = FixedArray::cast(feedback);
         for (int i = 0; i < feedback_array->length(); i += 2) {
           Object* handler = feedback_array->get(i + 1);
-          if (next && next->is_linked()) __ bind(next.get());
-          next.reset(new Label);
-          HandleCase(receiver, receiver_map, feedback_array->get(i), handler,
-                     &done, next.get());
+          if (next_ && next_->is_linked()) __ bind(next_);
+          next_storage_.reset(new Label);
+          next_ = next_storage_.get();
+          HandleCase(feedback_array->get(i), handler);
         }
+        if (next_ && next_->is_linked()) __ bind(next_);
       }
     } break;
     default:
       break;
   }
-  if (next && next->is_linked()) __ bind(next.get());
+}
+
+#endif  // ENABLE_IC
+
+void FastCodeGenerator::VisitLdaNamedProperty() {
+  Callable ic = CodeFactory::LoadICInOptimizedCode(isolate_);
+  Register receiver = LoadWithVectorDescriptor::ReceiverRegister();
+  LoadRegister(bytecode_iterator().GetRegisterOperand(0), receiver);
+#if defined(ENABLE_IC)
+  Handle<JSFunction> closure = closure_;
+  Label done, slowpath;
+
+  FeedbackSlot slot(bytecode_iterator().GetIndexOperand(2) -
+                    FeedbackVector::kReservedIndexCount);
+  LoadICNexus load_ic_nexus(closure->feedback_vector(), slot);
+  ICGenerator ic_generator(*this, load_ic_nexus, &slowpath, &done);
+  ic_generator.Generate();
   __ bind(&slowpath);
 #endif  // ENABLE_IC
   Handle<Object> name = bytecode_iterator().GetConstantForIndexOperand(1);

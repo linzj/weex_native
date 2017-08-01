@@ -69,13 +69,6 @@ class FastCodeGenerator {
   void ChangeInt32ToTagged(Register result);
   void BranchIfToBooleanIsTrue(Label* if_true, Label* if_false);
   void DoDelete(Runtime::FunctionId function_id);
-  void DoLoadField(Register receiver, int handler_word, Label* done);
-  void HandleSmiCase(const Register& receiver, const Register& receiver_map,
-                     Object* feedback, Object* smi, Label* done, Label* next);
-  void DoLoadConstant(Handle<Object> map, int handler_word, Label* done);
-  void DoNormalLoad(const Register& receiver, Label* done, Label* next);
-  void HandleCase(const Register& receiver, const Register& receiver_map,
-                  Object* feedback, Object* handler, Label* done, Label* next);
 
   Isolate* isolate_;
   MacroAssembler masm_;
@@ -87,6 +80,7 @@ class FastCodeGenerator {
   std::unique_ptr<interpreter::BytecodeArrayIterator> bytecode_iterator_;
   std::unique_ptr<LabelRecorder> label_recorder_;
   DISALLOW_COPY_AND_ASSIGN(FastCodeGenerator);  // NOLINT
+  friend class ICGenerator;
 };
 }
 }
