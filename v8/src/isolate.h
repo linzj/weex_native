@@ -1243,6 +1243,8 @@ class Isolate {
   // reset to nullptr.
   void UnregisterFromReleaseAtTeardown(ManagedObjectFinalizer** finalizer_ptr);
 
+  Object** CreateFakeHandle(Object* value);
+
  protected:
   explicit Isolate(bool enable_serializer);
   bool IsArrayOrObjectPrototype(Object* object);
@@ -1527,6 +1529,9 @@ class Isolate {
   ManagedObjectFinalizer managed_object_finalizers_list_;
 
   size_t total_regexp_code_generated_;
+  static const int max_fake_handles = 1024;
+  Object* fake_handles_[max_fake_handles];
+  int fake_handle_index_ = 0;
 
   friend class ExecutionAccess;
   friend class HandleScopeImplementer;

@@ -97,6 +97,9 @@ Handle<T> HandleScope::CloseAndEscape(Handle<T> handle_value) {
 }
 
 Object** HandleScope::CreateHandle(Isolate* isolate, Object* value) {
+  if (!isolate->thread_id().Equals(ThreadId::Current())) {
+    return isolate->CreateFakeHandle(value);
+  }
   DCHECK(AllowHandleAllocation::IsAllowed());
   HandleScopeData* data = isolate->handle_scope_data();
 
@@ -113,6 +116,9 @@ Object** HandleScope::CreateHandle(Isolate* isolate, Object* value) {
 
 
 Object** HandleScope::GetHandle(Isolate* isolate, Object* value) {
+  if (!isolate->thread_id().Equals(ThreadId::Current())) {
+    return isolate->CreateFakeHandle(value);
+  }
   DCHECK(AllowHandleAllocation::IsAllowed());
   HandleScopeData* data = isolate->handle_scope_data();
   CanonicalHandleScope* canonical = data->canonical_scope;

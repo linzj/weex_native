@@ -3704,6 +3704,15 @@ bool PostponeInterruptsScope::Intercept(StackGuard::InterruptFlag flag) {
   return false;
 }
 
+
+Object** Isolate::CreateFakeHandle(Object* value) {
+  int index = v8::base::NoBarrier_AtomicIncrement(&fake_handle_index_, 1);
+  static_assert(0 == ((max_fake_handles - 1) & max_fake_handles), "max_fake_handles must be power of 2");
+  index &= max_fake_handles - 1;
+  fake_handles_[index] = value;
+  return &fake_handles_[index];
+}
+
 }  // namespace internal
 }  // namespace v8
 

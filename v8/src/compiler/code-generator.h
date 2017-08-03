@@ -57,6 +57,7 @@ class CodeGenerator final : public GapResolver::Assembler {
 
   // Generate native code.
   Handle<Code> GenerateCode();
+  bool PregenerateCode();
 
   InstructionSequence* code() const { return code_; }
   FrameAccessState* frame_access_state() const { return frame_access_state_; }
@@ -290,6 +291,7 @@ class CodeGenerator final : public GapResolver::Assembler {
   int osr_pc_offset_;
   int optimized_out_literal_id_;
   SourcePositionTableBuilder source_position_table_builder_;
+  bool pregenerated_ = false;
 };
 
 }  // namespace compiler

@@ -205,6 +205,8 @@ class PipelineData {
   CommonOperatorBuilder* common() const { return common_; }
   JSOperatorBuilder* javascript() const { return javascript_; }
   JSGraph* jsgraph() const { return jsgraph_; }
+  CodeGenerator* code_generator() { return code_generator_.get(); }
+  void set_code_generator(CodeGenerator* code_generator) { return code_generator_.reset(code_generator); }
   Handle<Context> native_context() const {
     return handle(info()->native_context(), isolate());
   }
@@ -378,6 +380,8 @@ class PipelineData {
   ZoneVector<trap_handler::ProtectedInstructionData>* protected_instructions_ =
       nullptr;
 
+  std::unique_ptr<CodeGenerator> code_generator_;
+
   DISALLOW_COPY_AND_ASSIGN(PipelineData);
 };
 
@@ -398,6 +402,8 @@ class PipelineImpl final {
 
   // Run the concurrent optimization passes.
   bool OptimizeGraph(Linkage* linkage);
+
+  bool PregenerateCode(Linkage* linkage);
 
   // Perform the actual code generation and return handle to a code object.
   Handle<Code> GenerateCode(Linkage* linkage);
@@ -612,12 +618,19 @@ PipelineCompilationJob::Status PipelineCompilationJob::PrepareJobImpl() {
     if (isolate()->has_pending_exception()) return FAILED;  // Stack overflowed.
     return AbortOptimization(kGraphBuildingFailed);
   }
-
+  Object* maybe_script = info()->shared_info()->script();
+  if (maybe_script->IsScript()) {
+    Handle<Script> script(Script::cast(maybe_script));
+    Script::InitLineEnds(script);
+  }
   return SUCCEEDED;
 }
 
 PipelineCompilationJob::Status PipelineCompilationJob::ExecuteJobImpl() {
+  Heap::RelocationLock relocation_lock(isolate()->heap());
+  DisallowHeapAllocation no_allocation;
   if (!pipeline_.OptimizeGraph(linkage_)) return FAILED;
+  if (!pipeline_.PregenerateCode(linkage_)) return FAILED;
   return SUCCEEDED;
 }
 
@@ -1424,9 +1437,13 @@ struct GenerateCodePhase {
   static const char* phase_name() { return "generate code"; }
 
   void Run(PipelineData* data, Zone* temp_zone, Linkage* linkage) {
-    CodeGenerator generator(data->frame(), linkage, data->sequence(),
-                            data->info());
-    data->set_code(generator.GenerateCode());
+    if (!data->code_generator()) {
+      CodeGenerator generator(data->frame(), linkage, data->sequence(),
+                              data->info());
+      data->set_code(generator.GenerateCode());
+    } else {
+      data->set_code(data->code_generator()->GenerateCode());
+    }
   }
 };
 
@@ -1652,6 +1669,13 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
   data->source_positions()->RemoveDecorator();
 
   return ScheduleAndSelectInstructions(linkage, true);
+}
+
+bool PipelineImpl::PregenerateCode(Linkage* linkage) {
+  PipelineData* data = this->data_;
+  data->set_code_generator(new CodeGenerator(data->frame(), linkage, data->sequence(),
+                            data->info()));
+  return data->code_generator()->PregenerateCode();
 }
 
 Handle<Code> Pipeline::GenerateCodeForCodeStub(Isolate* isolate,
