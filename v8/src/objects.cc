@@ -4691,9 +4691,9 @@ void Map::EnsureDescriptorSlack(Handle<Map> map, int slack) {
 }
 
 // static
-Handle<Map> Map::GetObjectCreateMap(Handle<HeapObject> prototype) {
+Handle<Map> Map::GetObjectCreateMap(Handle<Context> native_context, Handle<HeapObject> prototype) {
   Isolate* isolate = prototype->GetIsolate();
-  Handle<Map> map(isolate->native_context()->object_function()->initial_map(),
+  Handle<Map> map(native_context->object_function()->initial_map(),
                   isolate);
   if (map->prototype() == *prototype) return map;
   if (prototype->IsNull(isolate)) {

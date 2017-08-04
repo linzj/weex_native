@@ -6106,7 +6106,7 @@ class Map: public HeapObject {
 
   Code* LookupInCodeCache(Name* name, Code::Flags code);
 
-  static Handle<Map> GetObjectCreateMap(Handle<HeapObject> prototype);
+  static Handle<Map> GetObjectCreateMap(Handle<Context> native_context, Handle<HeapObject> prototype);
 
   // Computes a hash value for this map, to be used in HashTables and such.
   int Hash();

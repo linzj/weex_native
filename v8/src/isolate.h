@@ -1531,7 +1531,7 @@ class Isolate {
   ManagedObjectFinalizer managed_object_finalizers_list_;
 
   size_t total_regexp_code_generated_;
-  static const int max_fake_handles = 1024;
+  static const int max_fake_handles = 4096;
   Object* fake_handles_[max_fake_handles];
   int fake_handle_index_ = 0;
 

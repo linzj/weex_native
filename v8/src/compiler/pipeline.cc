@@ -631,6 +631,7 @@ PipelineCompilationJob::Status PipelineCompilationJob::ExecuteJobImpl() {
     Handle<Code> code = pipeline_.GenerateCode(linkage_);
     if (code.is_null()) return FAILED;
     ReallocateCodeHandleToStorage(code);
+    info()->dependencies()->Commit(code);
   } catch (int) {
     return FAILED;
   }
@@ -641,15 +642,16 @@ PipelineCompilationJob::Status PipelineCompilationJob::FinalizeJobImpl() {
   Handle<Code> code;
   if (storage_->IsCode())
     code = Handle<Code>::cast(storage_);
-  else
-    code = pipeline_.GenerateCode(linkage_);
-  if (code.is_null()) {
-    if (info()->bailout_reason() == kNoReason) {
-      return AbortOptimization(kCodeGenerationFailed);
+  else {
+      code = pipeline_.GenerateCode(linkage_);
+    if (code.is_null()) {
+      if (info()->bailout_reason() == kNoReason) {
+        return AbortOptimization(kCodeGenerationFailed);
+      }
+      return FAILED;
     }
-    return FAILED;
+    info()->dependencies()->Commit(code);
   }
-  info()->dependencies()->Commit(code);
   info()->SetCode(code);
   if (info()->is_deoptimization_enabled()) {
     info()->context()->native_context()->AddOptimizedCode(*code);

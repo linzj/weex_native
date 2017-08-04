@@ -1566,7 +1566,7 @@ Reduction JSBuiltinReducer::ReduceObjectCreate(Node* node) {
   if (!prototype_const->IsNull(isolate()) && !prototype_const->IsJSReceiver()) {
     return NoChange();
   }
-  instance_map = Map::GetObjectCreateMap(prototype_const);
+  instance_map = Map::GetObjectCreateMap(native_context_, prototype_const);
   Node* properties = jsgraph()->EmptyFixedArrayConstant();
   if (instance_map->is_dictionary_map()) {
     // Allocated an empty NameDictionary as backing store for the properties.

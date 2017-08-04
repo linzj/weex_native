@@ -231,7 +231,7 @@ RUNTIME_FUNCTION(Runtime_ObjectCreate) {
   // TODO(bmeurer): Use a dedicated cache for Object.create; think about
   // slack tracking for Object.create.
   Handle<Map> map =
-      Map::GetObjectCreateMap(Handle<HeapObject>::cast(prototype));
+      Map::GetObjectCreateMap(isolate->native_context(), Handle<HeapObject>::cast(prototype));
 
   bool is_dictionary_map = map->is_dictionary_map();
   Handle<FixedArray> object_properties;
