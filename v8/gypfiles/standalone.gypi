@@ -1134,7 +1134,7 @@
           },  # Release
         },  # configurations
         'cflags': [ '-Wno-abi', '-Wall', '-W', '-Wno-unused-parameter'],
-        'cflags_cc': [ '-Wnon-virtual-dtor', '-fno-rtti', '-fno-exceptions',
+        'cflags_cc': [ '-Wnon-virtual-dtor', '-fno-rtti', '-fexceptions',
                        '-std=gnu++11' ],
         'target_conditions': [
           ['_toolset=="target"', {

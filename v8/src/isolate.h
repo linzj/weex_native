@@ -528,6 +528,8 @@ class Isolate {
   // True if at least one thread Enter'ed this isolate.
   bool IsInUse() { return entry_stack_ != NULL; }
 
+  bool InMainThread() { return thread_id().Equals(ThreadId::Current()); }
+
   // Destroys the non-default isolates.
   // Sets default isolate into "has_been_disposed" state rather then destroying,
   // for legacy API reasons.

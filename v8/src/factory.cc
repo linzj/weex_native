@@ -38,6 +38,8 @@ namespace internal {
     AllocationResult __allocation__ = FUNCTION_CALL;                          \
     Object* __object__ = NULL;                                                \
     RETURN_OBJECT_UNLESS_RETRY(ISOLATE, TYPE)                                 \
+    if (!ISOLATE->thread_id().Equals(ThreadId::Current()))                    \
+      throw 1;                                                                \
     /* Two GCs before panicking.  In newspace will almost always succeed. */  \
     for (int __i__ = 0; __i__ < 2; __i__++) {                                 \
       (ISOLATE)->heap()->CollectGarbage(                                      \

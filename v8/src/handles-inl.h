@@ -28,6 +28,9 @@ Handle<T> Handle<T>::New(T* object, Isolate* isolate) {
 HandleScope::HandleScope(Isolate* isolate) {
   HandleScopeData* data = isolate->handle_scope_data();
   isolate_ = isolate;
+  if (!isolate_->InMainThread()) {
+    return;
+  }
   prev_next_ = data->next;
   prev_limit_ = data->limit;
   data->level++;
@@ -44,6 +47,9 @@ inline std::ostream& operator<<(std::ostream& os, Handle<T> handle) {
 
 HandleScope::~HandleScope() {
 #ifdef DEBUG
+  if (!isolate_->InMainThread()) {
+    return;
+  }
   if (FLAG_check_handle_count) {
     int before = NumberOfHandles(isolate_);
     CloseScope(isolate_, prev_next_, prev_limit_);
@@ -62,6 +68,9 @@ HandleScope::~HandleScope() {
 void HandleScope::CloseScope(Isolate* isolate,
                              Object** prev_next,
                              Object** prev_limit) {
+  if (!isolate->InMainThread()) {
+    return;
+  }
   HandleScopeData* current = isolate->handle_scope_data();
 
   std::swap(current->next, prev_next);
@@ -97,7 +106,7 @@ Handle<T> HandleScope::CloseAndEscape(Handle<T> handle_value) {
 }
 
 Object** HandleScope::CreateHandle(Isolate* isolate, Object* value) {
-  if (!isolate->thread_id().Equals(ThreadId::Current())) {
+  if (!isolate->InMainThread()) {
     return isolate->CreateFakeHandle(value);
   }
   DCHECK(AllowHandleAllocation::IsAllowed());
@@ -116,7 +125,7 @@ Object** HandleScope::CreateHandle(Isolate* isolate, Object* value) {
 
 
 Object** HandleScope::GetHandle(Isolate* isolate, Object* value) {
-  if (!isolate->thread_id().Equals(ThreadId::Current())) {
+  if (!isolate->InMainThread()) {
     return isolate->CreateFakeHandle(value);
   }
   DCHECK(AllowHandleAllocation::IsAllowed());
@@ -128,6 +137,9 @@ Object** HandleScope::GetHandle(Isolate* isolate, Object* value) {
 
 #ifdef DEBUG
 inline SealHandleScope::SealHandleScope(Isolate* isolate) : isolate_(isolate) {
+  if (!isolate_->InMainThread()) {
+    return;
+  }
   // Make sure the current thread is allowed to create handles to begin with.
   CHECK(AllowHandleAllocation::IsAllowed());
   HandleScopeData* current = isolate_->handle_scope_data();
@@ -141,6 +153,9 @@ inline SealHandleScope::SealHandleScope(Isolate* isolate) : isolate_(isolate) {
 
 
 inline SealHandleScope::~SealHandleScope() {
+  if (!isolate_->InMainThread()) {
+    return;
+  }
   // Restore state in current handle scope to re-enable handle
   // allocations.
   HandleScopeData* current = isolate_->handle_scope_data();

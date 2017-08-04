@@ -403,8 +403,6 @@ class PipelineImpl final {
   // Run the concurrent optimization passes.
   bool OptimizeGraph(Linkage* linkage);
 
-  bool PregenerateCode(Linkage* linkage);
-
   // Perform the actual code generation and return handle to a code object.
   Handle<Code> GenerateCode(Linkage* linkage);
 
@@ -569,6 +567,9 @@ class PipelineCompilationJob final : public CompilationJob {
   Status FinalizeJobImpl() final;
 
  private:
+  void AllocateCodeHandleStorage();
+  void ReallocateCodeHandleToStorage(Handle<Code> code);
+
   std::unique_ptr<ParseInfo> parse_info_;
   ZoneStats zone_stats_;
   CompilationInfo info_;
@@ -576,6 +577,8 @@ class PipelineCompilationJob final : public CompilationJob {
   PipelineData data_;
   PipelineImpl pipeline_;
   Linkage* linkage_;
+
+  Handle<Object> storage_;
 
   DISALLOW_COPY_AND_ASSIGN(PipelineCompilationJob);
 };
@@ -613,29 +616,33 @@ PipelineCompilationJob::Status PipelineCompilationJob::PrepareJobImpl() {
 
   linkage_ = new (info()->zone())
       Linkage(Linkage::ComputeIncoming(info()->zone(), info()));
-
-  if (!pipeline_.CreateGraph()) {
-    if (isolate()->has_pending_exception()) return FAILED;  // Stack overflowed.
-    return AbortOptimization(kGraphBuildingFailed);
-  }
-  Object* maybe_script = info()->shared_info()->script();
-  if (maybe_script->IsScript()) {
-    Handle<Script> script(Script::cast(maybe_script));
-    Script::InitLineEnds(script);
-  }
+  AllocateCodeHandleStorage();
   return SUCCEEDED;
 }
 
 PipelineCompilationJob::Status PipelineCompilationJob::ExecuteJobImpl() {
-  Heap::RelocationLock relocation_lock(isolate()->heap());
-  DisallowHeapAllocation no_allocation;
-  if (!pipeline_.OptimizeGraph(linkage_)) return FAILED;
-  if (!pipeline_.PregenerateCode(linkage_)) return FAILED;
+  Heap::GCLock gc_lock(isolate()->heap(), true);
+  try {
+    if (!pipeline_.CreateGraph()) {
+      if (isolate()->has_pending_exception()) return FAILED;  // Stack overflowed.
+      return AbortOptimization(kGraphBuildingFailed);
+    }
+    if (!pipeline_.OptimizeGraph(linkage_)) return FAILED;
+    Handle<Code> code = pipeline_.GenerateCode(linkage_);
+    if (code.is_null()) return FAILED;
+    ReallocateCodeHandleToStorage(code);
+  } catch (int) {
+    return FAILED;
+  }
   return SUCCEEDED;
 }
 
 PipelineCompilationJob::Status PipelineCompilationJob::FinalizeJobImpl() {
-  Handle<Code> code = pipeline_.GenerateCode(linkage_);
+  Handle<Code> code;
+  if (storage_->IsCode())
+    code = Handle<Code>::cast(storage_);
+  else
+    code = pipeline_.GenerateCode(linkage_);
   if (code.is_null()) {
     if (info()->bailout_reason() == kNoReason) {
       return AbortOptimization(kCodeGenerationFailed);
@@ -649,6 +656,16 @@ PipelineCompilationJob::Status PipelineCompilationJob::FinalizeJobImpl() {
     RegisterWeakObjectsInOptimizedCode(code);
   }
   return SUCCEEDED;
+}
+
+void PipelineCompilationJob::AllocateCodeHandleStorage() {
+  storage_ = Handle<Object>(Smi::FromInt(0), isolate());
+}
+
+void PipelineCompilationJob::ReallocateCodeHandleToStorage(Handle<Code> code) {
+  if (storage_.is_null())
+    return;
+  *storage_.location() = *code.location();
 }
 
 class PipelineWasmCompilationJob final : public CompilationJob {
@@ -1437,13 +1454,10 @@ struct GenerateCodePhase {
   static const char* phase_name() { return "generate code"; }
 
   void Run(PipelineData* data, Zone* temp_zone, Linkage* linkage) {
-    if (!data->code_generator()) {
-      CodeGenerator generator(data->frame(), linkage, data->sequence(),
-                              data->info());
-      data->set_code(generator.GenerateCode());
-    } else {
-      data->set_code(data->code_generator()->GenerateCode());
-    }
+    if (!data->code().is_null()) return;
+    CodeGenerator generator(data->frame(), linkage, data->sequence(),
+                            data->info());
+    data->set_code(generator.GenerateCode());
   }
 };
 
@@ -1669,13 +1683,6 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
   data->source_positions()->RemoveDecorator();
 
   return ScheduleAndSelectInstructions(linkage, true);
-}
-
-bool PipelineImpl::PregenerateCode(Linkage* linkage) {
-  PipelineData* data = this->data_;
-  data->set_code_generator(new CodeGenerator(data->frame(), linkage, data->sequence(),
-                            data->info()));
-  return data->code_generator()->PregenerateCode();
 }
 
 Handle<Code> Pipeline::GenerateCodeForCodeStub(Isolate* isolate,

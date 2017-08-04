@@ -1309,6 +1309,7 @@ void Heap::UpdateSurvivalStatistics(int start_new_space_size) {
 
 bool Heap::PerformGarbageCollection(
     GarbageCollector collector, const v8::GCCallbackFlags gc_callback_flags) {
+  GCLock gc_lock(this, false);
   int freed_global_handles = 0;
 
   if (!IsYoungGenerationCollector(collector)) {
@@ -3055,7 +3056,7 @@ AllocationResult Heap::AllocateForeign(Address address,
                                        PretenureFlag pretenure) {
   // Statically ensure that it is safe to allocate foreigns in paged spaces.
   STATIC_ASSERT(Foreign::kSize <= kMaxRegularHeapObjectSize);
-  AllocationSpace space = (pretenure == TENURED) ? OLD_SPACE : NEW_SPACE;
+  AllocationSpace space = SelectSpace(pretenure);
   Foreign* result = nullptr;
   AllocationResult allocation = Allocate(foreign_map(), space);
   if (!allocation.To(&result)) return allocation;
@@ -6406,5 +6407,10 @@ int Heap::GetStaticVisitorIdForMap(Map* map) {
   return StaticVisitorBase::GetVisitorId(map);
 }
 
+
+AllocationSpace Heap::SelectSpace(PretenureFlag pretenure) {
+    if (!isolate_->InMainThread()) return OLD_SPACE;
+    return (pretenure == TENURED) ? OLD_SPACE : NEW_SPACE;
+}
 }  // namespace internal
 }  // namespace v8

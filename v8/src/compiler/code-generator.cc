@@ -73,7 +73,7 @@ void CodeGenerator::CreateFrameAccessState(Frame* frame) {
 }
 
 
-bool CodeGenerator::PregenerateCode() {
+Handle<Code> CodeGenerator::GenerateCode() {
   CompilationInfo* info = this->info();
 
   // Open a frame scope to indicate that there is a frame on the stack.  The
@@ -178,20 +178,11 @@ bool CodeGenerator::PregenerateCode() {
       } else {
         result = AssembleBlock(block);
       }
-      if (result != kSuccess) return false;
+      if (result != kSuccess) return Handle<Code>();
       unwinding_info_writer_.EndInstructionBlock(block);
     }
   }
 
-  pregenerated_ = true;
-  return true;
-}
-
-
-Handle<Code> CodeGenerator::GenerateCode() {
-  if (!pregenerated_ && !PregenerateCode())
-    return Handle<Code>();
-  CompilationInfo* info = this->info();
 
   // Assemble all out-of-line code.
   if (ools_) {

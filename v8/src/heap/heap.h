@@ -581,6 +581,30 @@ class Heap {
     Heap* heap_;
   };
 
+  class AllocationLock {
+   public:
+    explicit AllocationLock(Heap* heap) : heap_(heap) {
+      heap_->allocation_mutex_.Lock();
+    }
+
+    ~AllocationLock() { heap_->allocation_mutex_.Unlock(); }
+
+   private:
+    Heap* heap_;
+  };
+
+  class GCLock {
+   public:
+    explicit GCLock(Heap* heap, bool shared) : heap_(heap) {
+      heap_->gc_mutex_.Lock();
+    }
+
+    ~GCLock() { heap_->gc_mutex_.Unlock(); }
+
+   private:
+    Heap* heap_;
+  };
+
   // Support for partial snapshots.  After calling this we have a linear
   // space to write objects in each space.
   struct Chunk {
@@ -1632,9 +1656,7 @@ class Heap {
       Heap* heap, Object** pointer);
 
   // Selects the proper allocation space based on the pretenuring decision.
-  static AllocationSpace SelectSpace(PretenureFlag pretenure) {
-    return (pretenure == TENURED) ? OLD_SPACE : NEW_SPACE;
-  }
+  AllocationSpace SelectSpace(PretenureFlag pretenure);
 
 #define ROOT_ACCESSOR(type, name, camel_name) \
   inline void set_##name(type* value);
@@ -2351,6 +2373,8 @@ class Heap {
   ExternalStringTable external_string_table_;
 
   base::Mutex relocation_mutex_;
+  base::Mutex allocation_mutex_;
+  base::Mutex gc_mutex_;
 
   int gc_callbacks_depth_;
 

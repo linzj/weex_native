@@ -299,6 +299,8 @@ AllocationResult Heap::CopyFixedDoubleArray(FixedDoubleArray* src) {
 
 AllocationResult Heap::AllocateRaw(int size_in_bytes, AllocationSpace space,
                                    AllocationAlignment alignment) {
+  DCHECK(isolate()->InMainThread() ||
+         space != NEW_SPACE);
   DCHECK(AllowHandleAllocation::IsAllowed());
   DCHECK(AllowHeapAllocation::IsAllowed());
   DCHECK(gc_state_ == NOT_IN_GC);
@@ -310,6 +312,7 @@ AllocationResult Heap::AllocateRaw(int size_in_bytes, AllocationSpace space,
   isolate_->counters()->objs_since_last_full()->Increment();
   isolate_->counters()->objs_since_last_young()->Increment();
 #endif
+  AllocationLock allocation_lock(this);
 
   bool large_object = size_in_bytes > kMaxRegularHeapObjectSize;
   HeapObject* object = nullptr;

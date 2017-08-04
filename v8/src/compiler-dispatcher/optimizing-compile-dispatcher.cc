@@ -46,8 +46,6 @@ class OptimizingCompileDispatcher::CompileTask : public v8::Task {
  private:
   // v8::Task overrides.
   void Run() override {
-    DisallowHeapAllocation no_allocation;
-    DisallowHandleAllocation no_handles;
     DisallowHandleDereference no_deref;
 
     {
