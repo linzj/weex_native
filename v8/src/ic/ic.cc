@@ -1330,6 +1330,10 @@ Handle<Object> LoadIC::GetMapIndependentHandler(LookupIterator* lookup) {
         Handle<Object> accessors = lookup->GetAccessors();
         if (accessors->IsAccessorPair()) {
           if (!holder->HasFastProperties()) {
+            if (!holder->IsJSGlobalProxy() && !holder->IsJSGlobalObject()) {
+              TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalDH);
+              return LoadHandler::LoadNormal(isolate());
+            }
             TRACE_HANDLER_STATS(isolate(), LoadIC_SlowStub);
             return slow_stub();
           }

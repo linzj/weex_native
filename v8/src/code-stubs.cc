@@ -1974,13 +1974,70 @@ void GetPropertyStub::GenerateAssembly(
       };
 
   CodeStubAssembler::LookupInHolder lookup_element_in_holder =
-      [&assembler](
-          Node* receiver, Node* holder, Node* holder_map,
-          Node* holder_instance_type, Node* index, Label* next_holder,
-          Label* if_bailout) {
+      [&assembler, &var_result, &end](Node* receiver, Node* holder,
+                                      Node* holder_map,
+                                      Node* holder_instance_type, Node* index,
+                                      Label* next_holder, Label* if_bailout) {
         // Not supported yet.
+        // assembler.Use(next_holder);
+        // assembler.Goto(if_bailout);
+        // only specially handle js array.
         assembler.Use(next_holder);
-        assembler.Goto(if_bailout);
+        Node* is_jsarray_condition = assembler.Word32Equal(
+            holder_instance_type, assembler.Int32Constant(JS_ARRAY_TYPE));
+        assembler.GotoIfNot(is_jsarray_condition, if_bailout);
+        Variable var_value(&assembler, MachineRepresentation::kTagged);
+        Label if_found(&assembler, &var_value);
+        Node* elements_kind = assembler.LoadMapElementsKind(holder_map);
+        int32_t values[] = {
+            // Handled by {if_isobjectorsmi}.
+            FAST_SMI_ELEMENTS, FAST_HOLEY_SMI_ELEMENTS, FAST_ELEMENTS,
+            FAST_HOLEY_ELEMENTS,
+            // Handled by {if_isdouble}.
+            FAST_DOUBLE_ELEMENTS, FAST_HOLEY_DOUBLE_ELEMENTS,
+        };
+        Label if_isobjectorsmi(&assembler), if_isdouble(&assembler);
+        Label* labels[] = {
+            &if_isobjectorsmi, &if_isobjectorsmi, &if_isobjectorsmi,
+            &if_isobjectorsmi, &if_isdouble,      &if_isdouble,
+        };
+        STATIC_ASSERT(arraysize(values) == arraysize(labels));
+        Node* elements = assembler.LoadElements(holder);
+        assembler.Switch(elements_kind, if_bailout, values, labels,
+                         arraysize(values));
+        assembler.Bind(&if_isobjectorsmi);
+        {
+          Node* length = assembler.LoadAndUntagFixedArrayBaseLength(elements);
+
+          assembler.GotoIfNot(assembler.UintPtrLessThan(index, length),
+                              if_bailout /* oob */);
+
+          Node* element = assembler.LoadFixedArrayElement(elements, index);
+          var_value.Bind(element);
+          Node* the_hole = assembler.TheHoleConstant();
+          assembler.Branch(assembler.WordEqual(element, the_hole),
+                           if_bailout /* not found */, &if_found);
+        }
+        assembler.Bind(&if_isdouble);
+        {
+          Node* length = assembler.LoadAndUntagFixedArrayBaseLength(elements);
+
+          assembler.GotoIfNot(assembler.UintPtrLessThan(index, length),
+                              if_bailout /* oob */);
+
+          // Check if the element is a double hole, but don't load it.
+          Node* float64_value = assembler.LoadFixedDoubleArrayElement(
+              elements, index, MachineType::Float64(), 0,
+              CodeStubAssembler::INTPTR_PARAMETERS, if_bailout /* no found */);
+
+          var_value.Bind(assembler.AllocateHeapNumberWithValue(float64_value));
+          assembler.Goto(&if_found);
+        }
+        assembler.Bind(&if_found);
+        {
+          var_result.Bind(var_value.value());
+          assembler.Goto(&end);
+        }
       };
 
   assembler.TryPrototypeChainLookup(object, key, lookup_property_in_holder,
