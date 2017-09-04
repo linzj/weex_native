@@ -92,6 +92,9 @@ void KeyedStoreGenericAssembler::BranchIfPrototypesHaveNonFastElements(
   Variable var_map(this, MachineRepresentation::kTagged);
   var_map.Bind(receiver_map);
   Label loop_body(this, &var_map);
+  Node* empty_slow_element_dictionary =
+      LoadRoot(Heap::kEmptySlowElementDictionaryRootIndex);
+
   Goto(&loop_body);
 
   Bind(&loop_body);
@@ -111,6 +114,8 @@ void KeyedStoreGenericAssembler::BranchIfPrototypesHaveNonFastElements(
     STATIC_ASSERT(FIRST_ELEMENTS_KIND == FIRST_FAST_ELEMENTS_KIND);
     GotoIf(IsFastElementsKind(elements_kind), &loop_body);
     GotoIf(Word32Equal(elements_kind, Int32Constant(NO_ELEMENTS)), &loop_body);
+    Node* elements = LoadElements(prototype);
+    GotoIf(WordEqual(elements, empty_slow_element_dictionary), &loop_body);
     Goto(non_fast_elements);
   }
 }
