@@ -254,7 +254,7 @@ Handle<Object> JsonParser<seq_one_byte>::ParseJsonValue() {
     return Handle<Object>::null();
   }
 
-  if (c0_ == '"') return ParseJsonString();
+  if (c0_ == '"') return ParseJsonInternalizedString();
   if ((c0_ >= '0' && c0_ <= '9') || c0_ == '-') return ParseJsonNumber();
   if (c0_ == '{') return ParseJsonObject();
   if (c0_ == '[') return ParseJsonArray();
