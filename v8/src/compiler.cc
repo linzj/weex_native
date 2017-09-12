@@ -921,12 +921,14 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
     if (GetOptimizedCodeLater(job.get())) {
       job.release();  // The background recompile job owns this now.
       // do fast code gen here.
-
+#if 0
       TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
       FastCodeGenerator fcg(function, true);
       Handle<Code> code = fcg.Generate();
       return code;
-      // return isolate->builtins()->InOptimizationQueue();
+#else
+      return isolate->builtins()->InOptimizationQueue();
+#endif
     }
   } else {
     if (GetOptimizedCodeNow(job.get())) return info->code();

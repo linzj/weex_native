@@ -4039,6 +4039,10 @@ void BytecodeArray::set_osr_loop_nesting_level(int depth) {
   WRITE_INT8_FIELD(this, kOSRNestingLevelOffset, depth);
 }
 
+int BytecodeArray::execution_times() const {
+  return READ_INT8_FIELD(this, kExecutionTimes);
+}
+
 BytecodeArray::Age BytecodeArray::bytecode_age() const {
   return static_cast<Age>(READ_INT8_FIELD(this, kBytecodeAgeOffset));
 }

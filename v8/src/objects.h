@@ -4512,6 +4512,8 @@ class BytecodeArray : public FixedArrayBase {
   inline int osr_loop_nesting_level() const;
   inline void set_osr_loop_nesting_level(int depth);
 
+  inline int execution_times() const;
+
   // Accessors for bytecode's code age.
   inline Age bytecode_age() const;
   inline void set_bytecode_age(Age age);
@@ -4561,7 +4563,8 @@ class BytecodeArray : public FixedArrayBase {
   static const int kInterruptBudgetOffset = kParameterSizeOffset + kIntSize;
   static const int kOSRNestingLevelOffset = kInterruptBudgetOffset + kIntSize;
   static const int kBytecodeAgeOffset = kOSRNestingLevelOffset + kCharSize;
-  static const int kHeaderSize = kBytecodeAgeOffset + kCharSize;
+  static const int kExecutionTimes = kOSRNestingLevelOffset + kCharSize;
+  static const int kHeaderSize = kExecutionTimes + kCharSize;
 
   // Maximal memory consumption for a single BytecodeArray.
   static const int kMaxSize = 512 * MB;

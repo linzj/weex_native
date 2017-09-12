@@ -31,6 +31,16 @@ Handle<Code> FastCodeGenerator::Generate() {
   Object* maybe_byte_code_array = closure_->shared()->function_data();
   DCHECK(maybe_byte_code_array->IsBytecodeArray());
   bytecode_array_ = handle(BytecodeArray::cast(maybe_byte_code_array));
+  interpreter::BytecodeArrayIterator test_interator(bytecode_array_);
+  for (; !test_interator.done(); test_interator.Advance()) {
+    switch (test_interator.current_bytecode()) {
+      case interpreter::Bytecode::kCreateCatchContext:
+      case interpreter::Bytecode::kThrow:
+        return Handle<Code>();
+      default:
+        break;
+    }
+  }
   FrameScope frame_scope(&masm_, StackFrame::MANUAL);
   GeneratePrologue();
   GenerateBody();
@@ -451,13 +461,17 @@ void FastCodeGenerator::VisitStaContextSlot() {
   uint32_t slot_index = bytecode_iterator().GetIndexOperand(1);
   uint32_t depth = bytecode_iterator().GetUnsignedImmediateOperand(2);
   __ LoadContext(r1, r1, depth);
-  __ str(kInterpreterAccumulatorRegister, ContextMemOperand(r1, slot_index));
+  MemOperand memory_operand = ContextMemOperand(r1, slot_index);
+  __ str(kInterpreterAccumulatorRegister, memory_operand);
+  __ RecordWriteField(r1, memory_operand.offset() - kHeapObjectTag, kInterpreterAccumulatorRegister, r2, kLRHasBeenSaved, kDontSaveFPRegs);
 }
 
 void FastCodeGenerator::VisitStaCurrentContextSlot() {
   uint32_t slot_index = bytecode_iterator().GetIndexOperand(0);
   GetContext(r1);
-  __ str(kInterpreterAccumulatorRegister, ContextMemOperand(r1, slot_index));
+  MemOperand memory_operand = ContextMemOperand(r1, slot_index);
+  __ str(kInterpreterAccumulatorRegister, memory_operand);
+  __ RecordWriteField(r1, memory_operand.offset() - kHeapObjectTag, kInterpreterAccumulatorRegister, r2, kLRHasBeenSaved, kDontSaveFPRegs);
 }
 
 void FastCodeGenerator::DoLdaLookupSlot(Runtime::FunctionId function_id) {
@@ -575,7 +589,7 @@ void FastCodeGenerator::VisitStaLookupSlotStrict() {
   DoStaLookupSlot(LanguageMode::STRICT);
 }
 
-#define ENABLE_IC
+// #define ENABLE_IC
 #if defined(ENABLE_IC)
 class ICGenerator {
  public:
@@ -1905,7 +1919,7 @@ void FastCodeGenerator::VisitJumpIfToBooleanTrue() {
   Label* if_true =
       label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(if_true);
-#if 0
+#if 1
   Label if_false;
   __ mov(r1, kInterpreterAccumulatorRegister);
   BranchIfToBooleanIsTrue(if_true, &if_false);
@@ -1934,7 +1948,7 @@ void FastCodeGenerator::VisitJumpIfToBooleanFalse() {
   Label* if_false =
       label_recorder_->GetLabel(bytecode_iterator().GetJumpTargetOffset());
   DCHECK_NOT_NULL(if_false);
-#if 0
+#if 1
   Label if_true;
   __ mov(r1, kInterpreterAccumulatorRegister);
   BranchIfToBooleanIsTrue(&if_true, if_false);

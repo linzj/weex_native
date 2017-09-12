@@ -1047,6 +1047,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
   __ ldr(kInterpreterBytecodeArrayRegister,
          FieldMemOperand(debug_info, DebugInfo::kDebugBytecodeArrayIndex), ne);
 
+  // Check if needed to turn to JIT
+  Label stay_the_same;
+  __ ldrb(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
+  __ add(r2, r2, Operand(1));
+  __ strb(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
+  __ cmp(r2, Operand(8));
+  __ b(&stay_the_same, eq);
+  __ Push(r0, r3, r1);
+  __ CallRuntime(Runtime::kRecompileFast);
+  __ sub(sp, sp, Operand(4));
+  __ Pop(r0, r3, r1);
+
+  __ bind(&stay_the_same);
   // Check whether we should continue to use the interpreter.
   Label switch_to_different_code_kind;
   __ ldr(r0, FieldMemOperand(r0, SharedFunctionInfo::kCodeOffset));

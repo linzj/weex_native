@@ -409,25 +409,19 @@ RUNTIME_FUNCTION(Runtime_RecompileFast) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
-  const bool is_interpreted = function->shared()->IsInterpreted();
-  if (!is_interpreted) return function->code();
+  SharedFunctionInfo* function_info = function->shared();
+  const bool is_interpreted = function_info->IsInterpreted();
+  if (!is_interpreted) return Smi::FromInt(0);
 
-  FeedbackVector* vector = function->feedback_vector();
-  int with = 0, gen = 0, type_vector_ic_count = 0;
-
-  vector->ComputeCounts(&with, &gen, &type_vector_ic_count, is_interpreted);
-  if (type_vector_ic_count != 0 &&
-      ((100 * with / type_vector_ic_count) < FLAG_type_info_threshold)) {
-    return function->code();
-  }
   TimerEventScope<TimerEventCompileIgnition> optimize_code_timer(isolate);
   FastCodeGenerator fcg(function, false);
   Handle<Code> code = fcg.Generate();
+  if (code.is_null()) return Smi::FromInt(0);
   function->ReplaceCode(*code);
   SharedFunctionInfo* shared_code = function->shared();
   int ticks = shared_code->profiler_ticks();
   shared_code->set_profiler_ticks(ticks + 1);
-  return function->code();
+  return Smi::FromInt(0);
 }
 
 bool CodeGenerationFromStringsAllowed(Isolate* isolate,
