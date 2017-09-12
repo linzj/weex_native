@@ -463,7 +463,7 @@ void FastCodeGenerator::VisitStaContextSlot() {
   __ LoadContext(r1, r1, depth);
   MemOperand memory_operand = ContextMemOperand(r1, slot_index);
   __ str(kInterpreterAccumulatorRegister, memory_operand);
-  __ RecordWriteField(r1, memory_operand.offset() - kHeapObjectTag, kInterpreterAccumulatorRegister, r2, kLRHasBeenSaved, kDontSaveFPRegs);
+  __ RecordWriteField(r1, memory_operand.offset() + kHeapObjectTag, kInterpreterAccumulatorRegister, r2, kLRHasBeenSaved, kDontSaveFPRegs);
 }
 
 void FastCodeGenerator::VisitStaCurrentContextSlot() {
@@ -471,7 +471,7 @@ void FastCodeGenerator::VisitStaCurrentContextSlot() {
   GetContext(r1);
   MemOperand memory_operand = ContextMemOperand(r1, slot_index);
   __ str(kInterpreterAccumulatorRegister, memory_operand);
-  __ RecordWriteField(r1, memory_operand.offset() - kHeapObjectTag, kInterpreterAccumulatorRegister, r2, kLRHasBeenSaved, kDontSaveFPRegs);
+  __ RecordWriteField(r1, memory_operand.offset() + kHeapObjectTag, kInterpreterAccumulatorRegister, r2, kLRHasBeenSaved, kDontSaveFPRegs);
 }
 
 void FastCodeGenerator::DoLdaLookupSlot(Runtime::FunctionId function_id) {

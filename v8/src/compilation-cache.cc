@@ -468,7 +468,7 @@ void CompilationDiskCacheQueue::Clear() {
   end_ = 0;
 }
 
-void CompilationDiskCacheQueue::Age() { Clear(); }
+void CompilationDiskCacheQueue::Age() {  }
 
 void CompilationDiskCacheQueue::Iterate(ObjectVisitor* v) {
   int start = start_;

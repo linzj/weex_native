@@ -1049,10 +1049,13 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
 
   // Check if needed to turn to JIT
   Label stay_the_same;
+  __ ldr(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, FixedArrayBase::kLengthOffset));
+  __ cmp(r2, Operand(0x100 << 1));
+  __ b(&stay_the_same, ge);
   __ ldrb(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
   __ add(r2, r2, Operand(1));
   __ strb(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
-  __ cmp(r2, Operand(8));
+  __ cmp(r2, Operand(0x500));
   __ b(&stay_the_same, eq);
   __ Push(r0, r3, r1);
   __ CallRuntime(Runtime::kRecompileFast);
