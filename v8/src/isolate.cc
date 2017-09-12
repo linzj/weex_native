@@ -809,6 +809,7 @@ void Isolate::PrintStack(FILE* out, PrintStackMode mode) {
     accumulator.Log(this);
     incomplete_message_ = NULL;
     stack_trace_nesting_level_ = 0;
+    fflush(out);
   } else if (stack_trace_nesting_level_ == 1) {
     stack_trace_nesting_level_++;
     base::OS::PrintError(

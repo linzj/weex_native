@@ -410,10 +410,11 @@ void FastCodeGenerator::VisitStaDataPropertyInLiteral() {
   __ push(kInterpreterAccumulatorRegister);
   __ mov(r1, Operand(Smi::FromInt(bytecode_iterator().GetFlagOperand(2))));
   __ push(r1);
-  __ mov(r1, Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(3))));
-  __ push(r1);
 
   LoadFeedbackVector(r1);
+  __ push(r1);
+
+  __ mov(r1, Operand(Smi::FromInt(bytecode_iterator().GetIndexOperand(3))));
   __ push(r1);
 
   GetContext(cp);

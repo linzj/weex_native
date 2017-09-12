@@ -604,6 +604,7 @@ RUNTIME_FUNCTION(Runtime_Abort) {
       GetBailoutReason(static_cast<BailoutReason>(message_id));
   base::OS::PrintError("abort: %s\n", message);
   isolate->PrintStack(stderr);
+  fflush(stderr);
   base::OS::Abort();
   UNREACHABLE();
   return NULL;
