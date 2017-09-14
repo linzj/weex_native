@@ -2071,7 +2071,9 @@ void FastCodeGenerator::VisitStackCheck() {
   __ cmp(sp, r1);
   __ b(&done, ge);
   GetContext(cp);
+  __ push(kInterpreterAccumulatorRegister);
   __ CallRuntime(Runtime::kStackGuard);
+  __ pop(kInterpreterAccumulatorRegister);
   __ bind(&done);
 }
 

@@ -4040,7 +4040,11 @@ void BytecodeArray::set_osr_loop_nesting_level(int depth) {
 }
 
 int BytecodeArray::execution_times() const {
-  return READ_INT8_FIELD(this, kExecutionTimes);
+  return READ_INT32_FIELD(this, kExecutionTimes);
+}
+
+void BytecodeArray::reset_execution_times() {
+  WRITE_INT32_FIELD(this, kExecutionTimes, 0);
 }
 
 BytecodeArray::Age BytecodeArray::bytecode_age() const {
@@ -5856,6 +5860,7 @@ ACCESSORS(SharedFunctionInfo, script, Object, kScriptOffset)
 ACCESSORS(SharedFunctionInfo, debug_info, Object, kDebugInfoOffset)
 ACCESSORS(SharedFunctionInfo, function_identifier, Object,
           kFunctionIdentifierOffset)
+ACCESSORS(SharedFunctionInfo, fcg_code, Object, kFCGCodeOffset)
 
 SMI_ACCESSORS(FunctionTemplateInfo, length, kLengthOffset)
 BOOL_ACCESSORS(FunctionTemplateInfo, flag, hidden_prototype,

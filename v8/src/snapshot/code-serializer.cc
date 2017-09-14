@@ -98,6 +98,7 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
         }
         return;
       case Code::FUNCTION:
+      case Code::FAST_BYTECODE_FUNCTION:
         DCHECK(code_object->has_reloc_info_for_serialization());
         SerializeGeneric(code_object, how_to_code, where_to_point);
         return;
@@ -123,6 +124,7 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
     if (function_data->IsBytecodeArray()) {
       BytecodeArray* bytecode_array = BytecodeArray::cast(function_data);
       bytecode_array->set_interrupt_budget(FLAG_interrupt_budget);
+      bytecode_array->reset_execution_times();
     }
     function_info->set_profiler_ticks(0);
   } else if (obj->IsJSFunction()) {

@@ -4513,6 +4513,7 @@ class BytecodeArray : public FixedArrayBase {
   inline void set_osr_loop_nesting_level(int depth);
 
   inline int execution_times() const;
+  inline void reset_execution_times();
 
   // Accessors for bytecode's code age.
   inline Age bytecode_age() const;
@@ -4561,10 +4562,10 @@ class BytecodeArray : public FixedArrayBase {
   static const int kFrameSizeOffset = kSourcePositionTableOffset + kPointerSize;
   static const int kParameterSizeOffset = kFrameSizeOffset + kIntSize;
   static const int kInterruptBudgetOffset = kParameterSizeOffset + kIntSize;
-  static const int kOSRNestingLevelOffset = kInterruptBudgetOffset + kIntSize;
+  static const int kExecutionTimes = kInterruptBudgetOffset + kIntSize;
+  static const int kOSRNestingLevelOffset = kExecutionTimes + kIntSize;
   static const int kBytecodeAgeOffset = kOSRNestingLevelOffset + kCharSize;
-  static const int kExecutionTimes = kOSRNestingLevelOffset + kCharSize;
-  static const int kHeaderSize = kExecutionTimes + kCharSize;
+  static const int kHeaderSize = kBytecodeAgeOffset + kCharSize;
 
   // Maximal memory consumption for a single BytecodeArray.
   static const int kMaxSize = 512 * MB;
@@ -7137,6 +7138,8 @@ class SharedFunctionInfo: public HeapObject {
   // [debug info]: Debug information.
   DECL_ACCESSORS(debug_info, Object)
 
+  DECL_ACCESSORS(fcg_code, Object)
+
   // Bit field containing various information collected for debugging.
   // This field is either stored on the kDebugInfo slot or inside the
   // debug info struct.
@@ -7401,13 +7404,15 @@ class SharedFunctionInfo: public HeapObject {
       kFunctionIdentifierOffset + kPointerSize;
   static const int kFunctionLiteralIdOffset =
       kFeedbackMetadataOffset + kPointerSize;
+  static const int kFCGCodeOffset =
+      kFunctionLiteralIdOffset + kPointerSize;
 #if TRACE_MAPS
-  static const int kUniqueIdOffset = kFunctionLiteralIdOffset + kPointerSize;
+  static const int kUniqueIdOffset = kFCGCodeOffset + kPointerSize;
   static const int kLastPointerFieldOffset = kUniqueIdOffset;
 #else
   // Just to not break the postmortrem support with conditional offsets
-  static const int kUniqueIdOffset = kFunctionLiteralIdOffset;
-  static const int kLastPointerFieldOffset = kFunctionLiteralIdOffset;
+  static const int kUniqueIdOffset = kFCGCodeOffset;
+  static const int kLastPointerFieldOffset = kFCGCodeOffset;
 #endif
 
 #if V8_HOST_ARCH_32_BIT

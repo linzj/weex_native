@@ -1048,15 +1048,18 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
          FieldMemOperand(debug_info, DebugInfo::kDebugBytecodeArrayIndex), ne);
 
   // Check if needed to turn to JIT
-  Label stay_the_same;
+  Label stay_the_same, switch_to_fcg;
+  __ ldr(r2, FieldMemOperand(r0, SharedFunctionInfo::kFCGCodeOffset));
+  __ SmiTst(r2);
+  __ b(&switch_to_fcg, ne);
   __ ldr(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, FixedArrayBase::kLengthOffset));
   __ cmp(r2, Operand(0x100 << 1));
   __ b(&stay_the_same, ge);
-  __ ldrb(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
+  __ ldr(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
   __ add(r2, r2, Operand(1));
-  __ strb(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
+  __ str(r2, FieldMemOperand(kInterpreterBytecodeArrayRegister, BytecodeArray::kExecutionTimes));
   __ cmp(r2, Operand(0x500));
-  __ b(&stay_the_same, eq);
+  __ b(&stay_the_same, ne);
   __ Push(r0, r3, r1);
   __ CallRuntime(Runtime::kRecompileFast);
   __ sub(sp, sp, Operand(4));
@@ -1160,6 +1163,14 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
   __ str(r4, FieldMemOperand(r1, JSFunction::kCodeEntryOffset));
   __ RecordWriteCodeEntryField(r1, r4, r5);
   __ Jump(r4);
+
+  __ RecordComment("switch_to_fcg");
+  __ bind(&switch_to_fcg);
+  __ LeaveFrame(StackFrame::JAVA_SCRIPT);
+  __ add(r2, r2, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ str(r2, FieldMemOperand(r1, JSFunction::kCodeEntryOffset));
+  __ RecordWriteCodeEntryField(r1, r2, r5);
+  __ Jump(r2);
 }
 
 static void Generate_StackOverflowCheck(MacroAssembler* masm, Register num_args,

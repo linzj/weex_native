@@ -421,6 +421,7 @@ RUNTIME_FUNCTION(Runtime_RecompileFast) {
   SharedFunctionInfo* shared_code = function->shared();
   int ticks = shared_code->profiler_ticks();
   shared_code->set_profiler_ticks(ticks + 1);
+  shared_code->set_fcg_code(*code);
   return Smi::FromInt(0);
 }
 
