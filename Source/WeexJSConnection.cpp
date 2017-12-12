@@ -160,7 +160,7 @@ EnvPBuilder::EnvPBuilder()
         // LOOP_MOUNTPOINT/BOOTCLASSPATH and etc
         // but don't use LD_LIBRARY_PATH env may cause so cannot be found
         const char *android_root_env = "ANDROID_ROOT=";
-        if (std::strstr(*env, android_root_env) != nullptr) {
+        if (strstr(*env, android_root_env) != nullptr) {
             addNew(*env);
             break;
         }
