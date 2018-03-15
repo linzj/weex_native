@@ -20,3 +20,5 @@ STATIC
 target_include_directories(IPC
 PUBLIC
 .)
+
+SET_TARGET_PROPERTIES(IPC PROPERTIES COMPILE_FLAGS "-fexceptions -frtti")

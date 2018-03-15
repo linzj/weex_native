@@ -37,7 +37,7 @@ SET(ANDROID "1" CACHE STRING "ANDROID" FORCE)
 
 SET(ANDROID_COMMON_FLAGS "${CMAKE_CLANG_CFLAGS} --sysroot=${CMAKE_ANDROID_SYSROOT} -isystem ${CMAKE_ANDROID_STL_INCLUDE} -isystem ${CMAKE_ANDROID_STL_BITS_INCLUDE} -B${CMAKE_BINARY_PATH} -ffunction-sections -fdata-sections -fomit-frame-pointer -gcc-toolchain ${CMAKE_GCC_PATH} -flto=thin -mfloat-abi=softfp -mfpu=neon")
 SET(CMAKE_C_FLAGS "${ANDROID_COMMON_FLAGS}" CACHE STRING "toolchain_cflags" FORCE)
-SET(CMAKE_CXX_FLAGS "${ANDROID_COMMON_FLAGS} -std=gnu++1y" CACHE STRING "toolchain_cxxflags" FORCE)
+SET(CMAKE_CXX_FLAGS "${ANDROID_COMMON_FLAGS} -std=gnu++1y -fno-exceptions -fno-rtti" CACHE STRING "toolchain_cxxflags" FORCE)
 SET(CMAKE_ASM_FLAGS "${ANDROID_COMMON_FLAGS}" CACHE STRING "toolchain_asmflags" FORCE)
 SET(CMAKE_EXE_LINKER_FLAGS "-O2 -pie" CACHE STRING "toolchain_exelinkflags" FORCE)
 SET(CMAKE_SHARED_LINKER_FLAGS "-Wl,--gc-sections -Wl,--build-id=sha1 -flto -O3" CACHE STRING "toolchain_exelinkflags" FORCE)
