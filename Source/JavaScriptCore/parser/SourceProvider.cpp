@@ -56,5 +56,10 @@ void SourceProvider::getID()
     }
 }
 
+SourceCode makeSource(const String& source, const SourceOrigin& sourceOrigin, const String& url, const TextPosition& startPosition, SourceProviderSourceType sourceType)
+{
+    return SourceCode(StringSourceProvider::create(source, sourceOrigin, url, startPosition, sourceType), startPosition.m_line.oneBasedInt(), startPosition.m_column.oneBasedInt());
+}
+
 } // namespace JSC
 
