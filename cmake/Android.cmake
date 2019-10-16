@@ -35,18 +35,18 @@ SET(CMAKE_STRIP ${CMAKE_BINARY_PATH}/strip)
 
 SET(ANDROID "1" CACHE STRING "ANDROID" FORCE)
 
-SET(ANDROID_COMMON_FLAGS "${CMAKE_CLANG_CFLAGS} --sysroot=${CMAKE_ANDROID_SYSROOT} -isystem ${CMAKE_ANDROID_STL_INCLUDE} -isystem ${CMAKE_ANDROID_STL_BITS_INCLUDE} -B${CMAKE_BINARY_PATH} -ffunction-sections -fdata-sections -fomit-frame-pointer -gcc-toolchain ${CMAKE_GCC_PATH} -flto=thin -mfloat-abi=softfp -mfpu=neon")
+SET(ANDROID_COMMON_FLAGS "${CMAKE_CLANG_CFLAGS} --sysroot=${CMAKE_ANDROID_SYSROOT} -isystem ${CMAKE_ANDROID_STL_INCLUDE} -isystem ${CMAKE_ANDROID_STL_BITS_INCLUDE} -B${CMAKE_BINARY_PATH} -ffunction-sections -fdata-sections -fomit-frame-pointer -gcc-toolchain ${CMAKE_GCC_PATH} -flto -fwhole-program-vtables -mfloat-abi=softfp -mfpu=neon")
 SET(CMAKE_C_FLAGS "${ANDROID_COMMON_FLAGS}" CACHE STRING "toolchain_cflags" FORCE)
 SET(CMAKE_CXX_FLAGS "${ANDROID_COMMON_FLAGS} -std=gnu++1y -fno-exceptions -fno-rtti" CACHE STRING "toolchain_cxxflags" FORCE)
 SET(CMAKE_ASM_FLAGS "${ANDROID_COMMON_FLAGS}" CACHE STRING "toolchain_asmflags" FORCE)
-SET(CMAKE_EXE_LINKER_FLAGS "-O2 -pie" CACHE STRING "toolchain_exelinkflags" FORCE)
-SET(CMAKE_SHARED_LINKER_FLAGS "-Wl,--gc-sections -Wl,--build-id=sha1 -flto -O3" CACHE STRING "toolchain_exelinkflags" FORCE)
+SET(CMAKE_EXE_LINKER_FLAGS "-O2 -pie -fuse-ld=lld" CACHE STRING "toolchain_exelinkflags" FORCE)
+SET(CMAKE_SHARED_LINKER_FLAGS "-Wl,--gc-sections -Wl,--build-id=sha1 -fuse-ld=lld -Wl,--icf=all -mfloat-abi=softfp -mfpu=neon -flto -fwhole-program-vtables -Wl,--lto-O2" CACHE STRING "toolchain_exelinkflags" FORCE)
 SET(CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS "-shared")
 SET(CMAKE_SHARED_LIBRARY_PREFIX "lib")
 SET(CMAKE_SHARED_LIBRARY_SUFFIX ".so")
 SET(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "")
-SET(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-Oz -g -DNDEBUG")
-SET(CMAKE_C_FLAGS_RELWITHDEBINFO "-Oz -g -DNDEBUG")
+SET(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-Os -g -DNDEBUG")
+SET(CMAKE_C_FLAGS_RELWITHDEBINFO "-Os -g -DNDEBUG")
 link_libraries($ENV{DEFAULT_LIBRARY})
 link_directories(
 $ENV{NDK_ROOT}/sources/cxx-stl/llvm-libc++/libs/${CMAKE_TARGET_ABI_NAME}

@@ -15,7 +15,7 @@ sandbox/linux/seccomp-bpf/trap.cc
 base/scoped_file.cc
 )
 
-set_source_files_properties(sandbox/linux/seccomp-bpf/syscall.cc PROPERTIES COMPILE_FLAGS -fno-lto)
+set_source_files_properties(sandbox/linux/seccomp-bpf/syscall.cc PROPERTIES COMPILE_FLAGS "-fno-lto -fno-whole-program-vtables")
 target_include_directories(Sandbox
 PUBLIC
 .)
